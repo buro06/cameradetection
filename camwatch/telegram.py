@@ -212,8 +212,12 @@ class TelegramBot:
                 self._halt.wait(10)
 
     def _authorized(self, chat_id: int, user_id: int | None) -> bool:
+        """With `allowed_user_ids` set, only those users may use commands and buttons, in any chat (alert
+        groups included). Left empty, anyone in an alert chat may."""
         tg = self.cfg.telegram
-        return chat_id in tg.chat_ids or (user_id is not None and user_id in tg.allowed_user_ids)
+        if tg.allowed_user_ids:
+            return user_id is not None and user_id in tg.allowed_user_ids
+        return chat_id in tg.chat_ids
 
     def _handle_update(self, upd: dict) -> None:
         if cb := upd.get("callback_query"):

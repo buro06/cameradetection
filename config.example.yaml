@@ -42,7 +42,8 @@ telegram:
   enabled: true
   bot_token: ""           # or set env var CAMWATCH_TELEGRAM_TOKEN (preferred)
   chat_ids: []            # chats that receive alerts (use `camwatch setup` to discover)
-  allowed_user_ids: []    # users allowed to send commands from any chat
+  allowed_user_ids: []    # command whitelist: only these users may use commands and face buttons, in any
+                          # chat including alert groups (empty = anyone in an alert chat may)
   send_unknown_faces: true
 
 cameras:

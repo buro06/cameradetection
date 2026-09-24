@@ -76,7 +76,8 @@ class TelegramConfig:
     enabled: bool = False
     bot_token: str = ""
     chat_ids: list[int] = field(default_factory=list)  # chats that receive alerts
-    allowed_user_ids: list[int] = field(default_factory=list)  # users allowed to send commands
+    # command whitelist, applies in alert groups too (empty = anyone in an alert chat may send commands)
+    allowed_user_ids: list[int] = field(default_factory=list)
     send_unknown_faces: bool = True
 
 

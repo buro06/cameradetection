@@ -62,7 +62,7 @@ camwatch            # start monitoring with the live dashboard
 3. Send `/start` to your bot, or add it to a group.
 4. Choose **Find chats & users**.
 
-Alerts go to `chat_ids`. Commands are accepted only from those chats or from `allowed_user_ids`; everything else is ignored and logged. To keep the token out of `config.yaml`, set it in the `CAMWATCH_TELEGRAM_TOKEN` environment variable instead.
+Alerts go to `chat_ids`. `allowed_user_ids` is the command whitelist. When it's set, only those users can use commands and the face-labelling buttons, in any chat, alert groups included, so other group members still get alerts but can't control the bot. When it's empty, anyone in an alert chat can. Everything else is ignored and logged. To keep the token out of `config.yaml`, set it in the `CAMWATCH_TELEGRAM_TOKEN` environment variable instead.
 
 ### Dashboard keys
 
