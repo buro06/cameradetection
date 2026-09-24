@@ -105,3 +105,27 @@ def test_callback_from_stranger_rejected(bot, db):
         "id": "cb", "data": f"ig:{uid}", "from": {"id": STRANGER},
         "message": {"message_id": 5, "chat": {"id": STRANGER}}}})
     assert db.unknown_exists(uid)
+
+
+def test_disk_command_replies_with_report(bot, monkeypatch):
+    import camwatch.telegram as tg
+
+    class SyncThread:
+        def __init__(self, target, args=(), **kw):
+            self.target, self.args = target, args
+
+        def start(self):
+            self.target(*self.args)
+
+    monkeypatch.setattr(tg.threading, "Thread", SyncThread)
+    monkeypatch.setattr(tg, "disk_report", lambda cfg, esc: "💾 report")
+    bot._handle_update(msg("/disk"))
+    texts = [fn for fn, _ in bot.sent]
+    assert len(texts) == 2  # typing indicator + report
+    texts[1]()
+    assert bot.calls[-1] == ("sendMessage", {"chat_id": CHAT, "text": "💾 report", "parse_mode": "HTML"})
+
+
+def test_disk_command_requires_authorization(bot):
+    bot._handle_update(msg("/disk", chat=STRANGER, user=STRANGER))
+    assert bot.sent == []

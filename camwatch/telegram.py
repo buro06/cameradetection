@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 import cv2
 import requests
 
+from .diskusage import disk_report
 from .events import EventResult
 
 if TYPE_CHECKING:
@@ -30,6 +31,7 @@ HELP = """<b>camwatch commands</b>
 /arm [camera] – enable alerts (all cameras if none given)
 /disarm [camera] – pause alerts
 /snapshot [camera] – live picture
+/disk – space used by camwatch vs free disk space
 /people – known people
 /unknowns – recent unknown faces to label
 /name &lt;Name&gt; – reply to a face to label it
@@ -184,7 +186,8 @@ class TelegramBot:
                     self.bot_name = me.get("username", "")
                     self.call("setMyCommands", commands=[
                         {"command": c, "description": d} for c, d in [
-                            ("status", "Camera status"), ("snapshot", "Live picture"), ("arm", "Enable alerts"),
+                            ("status", "Camera status"), ("snapshot", "Live picture"), ("disk", "Disk space"),
+                            ("arm", "Enable alerts"),
                             ("disarm", "Pause alerts"), ("people", "Known people"), ("unknowns", "Unknown faces"),
                             ("help", "Help")]])
                 updates = self.call("getUpdates", offset=self._offset, timeout=25, http_timeout=40,
@@ -241,6 +244,13 @@ class TelegramBot:
         if reply:
             self.send_text(reply, chat_id)
 
+    def _disk_reply(self, chat_id: int) -> None:
+        try:
+            self.send_text(disk_report(self.cfg, _esc), chat_id)
+        except Exception as e:
+            log.exception("Disk report failed")
+            self.send_text(f"Disk report failed: {_esc(str(e))}", chat_id)
+
     def _handle_callback(self, data: str) -> str:
         parts = data.split(":")
         db = self.engine.db
@@ -295,6 +305,11 @@ class TelegramBot:
                     self.send_text(f"{_esc(name)}: no frame available", chat_id)
                 else:
                     self._enqueue(self._send_photo, chat_id, jpg, f"{name} — {datetime.now():%H:%M:%S}")
+            return None
+        if cmd == "/disk":
+            self._enqueue(lambda: self.call("sendChatAction", chat_id=chat_id, action="typing"))
+            # walking the folder (incl. the Python env) can take seconds; don't block other commands
+            threading.Thread(target=self._disk_reply, args=(chat_id,), name="tg-disk", daemon=True).start()
             return None
         if cmd == "/people":
             people = db.list_persons()

@@ -88,6 +88,7 @@ Monitoring keeps running while menus are open.
 | `/status` | Camera health, arm state, what's in view, last event |
 | `/arm [camera]` · `/disarm [camera]` | Enable or pause alerts (all cameras, or one) |
 | `/snapshot [camera]` | Live picture(s) with detections drawn |
+| `/disk` | Space used by the camwatch folder (clips, snapshots, faces, models, logs, Python env) vs. free and total disk space, with a low-space warning |
 | `/people` · `/unknowns` | List known people / resend recent unknown faces for labeling |
 | `/name <Name>` · `/trust <Name>` | Reply to a face photo to label it (`/trust` = no alerts for that person) |
 | `/name 17 Alice` | Label unknown face #17 without replying |
