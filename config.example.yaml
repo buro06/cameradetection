@@ -54,6 +54,7 @@ cameras:
     backend: auto         # Windows: dshow (default) or msmf
     width: 1920           # requested capture size (USB only; 0 = driver default)
     height: 1080
+    fps: 30               # requested frame rate (USB only; 0 = driver default)
     fourcc: auto          # auto (= MJPG on Windows) | MJPG | YUY2 | none
   - name: garage
     source: "http://192.168.1.30/snapshot.jpg"   # JPEG snapshot URL (polled)

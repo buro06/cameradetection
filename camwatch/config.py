@@ -24,6 +24,7 @@ class CameraConfig:
     backend: str = "auto"
     width: int = 0  # requested capture size for USB cameras (0 = driver default)
     height: int = 0
+    fps: float = 0.0  # requested frame rate for USB cameras (0 = driver default)
     # USB pixel format: auto (MJPG on Windows) | MJPG | YUY2 | none
     fourcc: str = "auto"
     snapshot_fps: float = 2.0

@@ -67,6 +67,50 @@ def test_no_resolution_requested_by_default(monkeypatch):
     assert not any(p in (cv2.CAP_PROP_FRAME_WIDTH, cv2.CAP_PROP_FRAME_HEIGHT) for p, _ in fake.calls)
 
 
+class FormatDroppingCapture(FakeCapture):
+    """Like DirectShow: changing the FPS restarts the device in YUY2; `sticky` = MJPG can be re-applied."""
+
+    def __init__(self, sticky=True):
+        super().__init__(native=(1920, 1080))
+        self.fourcc, self.sticky = 0, sticky
+
+    def set(self, prop, value):
+        if prop == cv2.CAP_PROP_FOURCC and (self.sticky or not self.fourcc):
+            self.fourcc = int(value)
+        if prop == cv2.CAP_PROP_FPS:
+            self.fourcc = YUY2
+        return super().set(prop, value)
+
+    def get(self, prop):
+        return self.fourcc if prop == cv2.CAP_PROP_FOURCC else super().get(prop)
+
+
+YUY2 = cv2.VideoWriter_fourcc(*"YUY2")
+
+
+def test_fps_is_requested_after_resolution(monkeypatch):
+    fake = open_usb(monkeypatch, "win32", FakeCapture(), width=1920, height=1080, fps=30)
+    assert fake.calls == [(cv2.CAP_PROP_FOURCC, MJPG), (cv2.CAP_PROP_FRAME_WIDTH, 1920),
+                          (cv2.CAP_PROP_FRAME_HEIGHT, 1080), (cv2.CAP_PROP_FPS, 30)]
+
+
+def test_no_fps_requested_by_default(monkeypatch):
+    assert not any(p == cv2.CAP_PROP_FPS for p, _ in open_usb(monkeypatch, "win32", FakeCapture()).calls)
+
+
+def test_mjpg_reapplied_when_fps_change_drops_it(monkeypatch, caplog):
+    with caplog.at_level(logging.INFO, logger="camwatch.camera"):
+        fake = open_usb(monkeypatch, "win32", FormatDroppingCapture(), width=1920, height=1080, fps=30)
+    assert fake.calls[-1] == (cv2.CAP_PROP_FOURCC, MJPG) and fake.fourcc == MJPG
+    assert "ignored pixel format" not in caplog.text and "1920x1080 MJPG" in caplog.text
+
+
+def test_ignored_pixel_format_is_logged(monkeypatch, caplog):
+    with caplog.at_level(logging.WARNING, logger="camwatch.camera"):
+        open_usb(monkeypatch, "win32", FormatDroppingCapture(sticky=False), width=1920, height=1080, fps=30)
+    assert "camera ignored pixel format MJPG and uses YUY2" in caplog.text
+
+
 def test_resolution_mismatch_is_logged(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger="camwatch.camera"):
         open_usb(monkeypatch, "win32", FakeCapture(honor=False), width=1920, height=1080)
@@ -103,6 +147,16 @@ def test_same_resolution_reports_unchanged(monkeypatch):
     cam = CameraConfig(name="usb", source="0", width=1280, height=720)
     script(monkeypatch, (1280, 720))
     assert menus.pick_resolution(cam) is False
+
+
+def test_pick_preset_and_custom_fps(monkeypatch):
+    cam = CameraConfig(name="usb", source="0")
+    script(monkeypatch, 30.0)
+    assert menus.pick_fps(cam) is True and cam.fps == 30
+    script(monkeypatch, "custom", "20")
+    assert menus.pick_fps(cam) is True and cam.fps == 20
+    script(monkeypatch, 20.0)
+    assert menus.pick_fps(cam) is False
 
 
 def test_pick_usb_format(monkeypatch):
