@@ -15,6 +15,7 @@ import numpy as np
 
 from .config import ClipConfig
 from .events import EventResult
+from .timefmt import stamp
 
 log = logging.getLogger(__name__)
 
@@ -84,7 +85,7 @@ def write_clip(result: EventResult, path: Path, cfg: ClipConfig) -> Path:
                 if f.overlay:
                     draw_boxes(img, f.overlay.boxes, labels, f.scale)
                 wall = result.wall_time + (t - result.anchor)
-                draw_stamp(img, f"{result.camera}  {datetime.fromtimestamp(wall):%Y-%m-%d %H:%M:%S}")
+                draw_stamp(img, f"{result.camera}  {stamp(wall)}")
             proc.stdin.write(np.ascontiguousarray(img).tobytes())
         proc.stdin.close()
         err = proc.stderr.read().decode(errors="replace")

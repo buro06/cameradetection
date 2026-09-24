@@ -15,6 +15,7 @@ from rich.console import Console
 
 from . import __version__
 from .config import DEFAULT_CONFIG_PATH, AppConfig, load_config
+from .timefmt import LOG_DATEFMT
 
 log = logging.getLogger("camwatch")
 
@@ -26,7 +27,8 @@ def setup_logging(cfg: AppConfig, console_logging: bool, verbose: bool):
     logs_dir.mkdir(parents=True, exist_ok=True)
     root = logging.getLogger()
     root.setLevel(logging.DEBUG if verbose else logging.INFO)
-    fmt = logging.Formatter("%(asctime)s %(levelname)-7s %(threadName)-12s %(name)s: %(message)s")
+    fmt = logging.Formatter("%(asctime)s %(levelname)-7s %(threadName)-12s %(name)s: %(message)s",
+                            datefmt=LOG_DATEFMT)
     fh = logging.handlers.RotatingFileHandler(logs_dir / "camwatch.log", maxBytes=5_000_000, backupCount=5, encoding="utf-8")
     fh.setFormatter(fmt)
     root.addHandler(fh)

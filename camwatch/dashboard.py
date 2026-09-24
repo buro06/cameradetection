@@ -6,7 +6,6 @@ import logging
 import sys
 import time
 from collections import deque
-from datetime import datetime
 
 from rich.console import Console
 from rich.layout import Layout
@@ -16,6 +15,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .engine import Engine
+from .timefmt import clock
 
 DECISION_STYLE = {"alert": "bold red", "trusted": "green", "cooldown": "yellow", "disarmed": "dim",
                   "unchanged": "dim"}
@@ -30,7 +30,7 @@ class LogBuffer(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            self.lines.append((record.levelname, f"{datetime.fromtimestamp(record.created):%H:%M:%S} {record.getMessage()}"))
+            self.lines.append((record.levelname, f"{clock(record.created)} {record.getMessage()}"))
         except Exception:
             pass
 
@@ -123,12 +123,12 @@ def render(engine: Engine, logs: LogBuffer, height: int) -> Layout:
         cams.add_row(Text("No cameras configured — press [m] → Cameras → Add", style="yellow"))
 
     ev = Table(expand=True, box=None, show_header=False, pad_edge=False)
-    ev.add_column(width=9, no_wrap=True)
+    ev.add_column(width=11, no_wrap=True, justify="right")
     ev.add_column(width=14, no_wrap=True)
     ev.add_column(width=9, no_wrap=True)
     ev.add_column(ratio=1)
     for e in list(engine.events)[:12]:
-        ev.add_row(f"{datetime.fromtimestamp(e.wall_time):%H:%M:%S}", e.camera,
+        ev.add_row(clock(e.wall_time), e.camera,
                    Text(e.decision, style=DECISION_STYLE.get(e.decision, "")), e.summary)
 
     n_log = max(3, height - 14 - len(engine.cfg.cameras) - min(12, len(engine.events)))

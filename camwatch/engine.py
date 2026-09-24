@@ -19,6 +19,7 @@ from .detector import PersonDetector
 from .events import CameraMonitor, EventResult
 from .faces import FaceDB, FaceEngine
 from .recorder import clip_path, draw_boxes, draw_stamp, purge_old_clips, write_clip
+from .timefmt import clock, stamp
 
 log = logging.getLogger(__name__)
 
@@ -207,7 +208,7 @@ class Engine:
     def _append_event_log(self, entry: EventLogEntry) -> None:
         try:
             with open(self.data / "events.jsonl", "a", encoding="utf-8") as f:
-                f.write(json.dumps({"time": datetime.fromtimestamp(entry.wall_time).isoformat(timespec="seconds"),
+                f.write(json.dumps({"time": datetime.fromtimestamp(entry.wall_time).astimezone().isoformat(timespec="seconds"),
                                     "camera": entry.camera, "decision": entry.decision,
                                     "people": entry.summary, "clip": entry.clip}) + "\n")
         except OSError:
@@ -256,7 +257,7 @@ class Engine:
         if overlay and time.monotonic() - overlay.ts < 1.0:
             labels = {tid: mon._label(t, trusted_map) for tid, t in dict(mon.tracker.tracks).items()}
             draw_boxes(img, overlay.boxes, labels, 1.0)
-        draw_stamp(img, f"{cam.name}  {datetime.now():%Y-%m-%d %H:%M:%S}")
+        draw_stamp(img, f"{cam.name}  {stamp(datetime.now())}")
         ok, jpg = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 88])
         return jpg.tobytes() if ok else None
 
@@ -288,6 +289,6 @@ class Engine:
                 line += f" · now: {', '.join(r['visible'])}"
             if r["last_event"]:
                 le = r["last_event"]
-                line += f"\n   last: {datetime.fromtimestamp(le.wall_time):%d %b %H:%M:%S} {le.decision} – {le.summary()}"
+                line += f"\n   last: {datetime.fromtimestamp(le.wall_time):%d %b} {clock(le.wall_time)} {le.decision} – {le.summary()}"
             lines.append(line)
         return "\n".join(lines)

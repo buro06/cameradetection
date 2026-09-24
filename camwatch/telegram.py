@@ -17,6 +17,7 @@ import requests
 
 from .diskusage import disk_report
 from .events import EventResult
+from .timefmt import clock
 
 if TYPE_CHECKING:
     from .engine import Engine
@@ -137,7 +138,7 @@ class TelegramBot:
 
     def send_alert(self, result: EventResult, clip: Path | None) -> None:
         when = datetime.fromtimestamp(result.wall_time)
-        lines = [f"🚨 <b>{_esc(result.camera)}</b> — {when:%H:%M:%S} ({when:%a %d %b})"]
+        lines = [f"🚨 <b>{_esc(result.camera)}</b> — {clock(when)} ({when:%a %d %b})"]
         for p in result.people:
             icon = "🟢" if p.trusted else ("🟠" if p.name else "🔴")
             lines.append(f"{icon} {_esc(p.label)}")
@@ -304,7 +305,7 @@ class TelegramBot:
                 if jpg is None:
                     self.send_text(f"{_esc(name)}: no frame available", chat_id)
                 else:
-                    self._enqueue(self._send_photo, chat_id, jpg, f"{name} — {datetime.now():%H:%M:%S}")
+                    self._enqueue(self._send_photo, chat_id, jpg, f"{name} — {clock(datetime.now())}")
             return None
         if cmd == "/disk":
             self._enqueue(lambda: self.call("sendChatAction", chat_id=chat_id, action="typing"))
