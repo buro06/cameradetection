@@ -168,7 +168,28 @@ def test_single_frame_false_positive_is_ignored(cfg, db):
     assert results == []
 
 
+def test_default_clip_is_five_seconds_from_first_detection(cfg, db):
+    assert (cfg.events.pre_seconds, cfg.events.post_seconds) == (0.0, 5.0)
+    mon, _ = make_monitor(cfg, db)
+    results, _ = run(mon, [LEFT], 10.0, 7)  # first detection at t=10.0, confirmed at t=10.2
+    r = results[0]
+    assert (r.start, r.anchor, r.end) == pytest.approx((10.0, 10.0, 15.0))
+
+
+def test_ring_buffer_keeps_frames_before_confirmation_with_zero_pre_roll():
+    from camwatch.camera import BufferedFrame, CameraStream
+    from camwatch.config import CameraConfig, ClipConfig
+
+    clip = ClipConfig()
+    stream = CameraStream(CameraConfig(name="c", source="0"), clip, pre_seconds=0.0)
+    for i in range(int(3 * clip.fps)):  # 3 s of buffered frames, 0..3 s
+        stream._ring.append(BufferedFrame(i / clip.fps, FRAME, 1.0, None))
+    rec = stream.start_recording(since=2.0)  # person first seen 1 s before confirmation at t=3
+    assert rec.frames and rec.frames[0].ts == pytest.approx(2.0)
+
+
 def test_clip_window_covers_pre_and_post_roll(cfg, db):
+    cfg.events.pre_seconds, cfg.events.post_seconds = 2.0, 3.0
     mon, _ = make_monitor(cfg, db)
     results, _ = run(mon, [LEFT], 10.0, 6)
     r = results[0]

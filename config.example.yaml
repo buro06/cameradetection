@@ -23,8 +23,8 @@ face:
   max_unknown_images: 5
 
 events:
-  pre_seconds: 2.0        # clip starts this long before the person appeared
-  post_seconds: 3.0       # ...and ends this long after (identification continues meanwhile)
+  pre_seconds: 0.0        # clip starts this long before the person was first detected (0 = at detection)
+  post_seconds: 5.0       # ...and runs this long after; alerts are decided at the end of this window
   cooldown_seconds: 60    # per person, per camera
   track_ttl: 2.0
 
@@ -48,8 +48,9 @@ cameras:
   - name: desk
     source: "0"           # USB webcam index
     backend: auto         # Windows: dshow (default) or msmf
-    width: 1280
-    height: 720
+    width: 1920           # requested capture size (USB only; 0 = driver default)
+    height: 1080
+    fourcc: auto          # auto (= MJPG on Windows) | MJPG | YUY2 | none
   - name: garage
     source: "http://192.168.1.30/snapshot.jpg"   # JPEG snapshot URL (polled)
     snapshot_fps: 2

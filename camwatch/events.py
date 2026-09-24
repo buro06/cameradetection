@@ -2,7 +2,8 @@
 
 Event lifecycle:
   1. A confirmed person track needs attention (new, identity changed, or cooldown expired).
-  2. Recording starts from `pre_seconds` before the person appeared (ring buffer).
+  2. Recording starts `pre_seconds` before the person was first detected (default 0: at detection; the
+     ring buffer still supplies the frames between first detection and confirmation).
   3. For `post_seconds` detection + face recognition keep running and faces vote on each track.
   4. The event is finalized: no alert if every person is a confirmed trusted face, otherwise
      alert unless every non-trusted identity is still inside its per-camera cooldown.
@@ -257,7 +258,7 @@ class CameraMonitor:
                 self.event.tracks[t.id] = t
 
     def tick(self, now: float) -> EventResult | None:
-        """Finish the active event once its post-roll has been recorded."""
+        """Finish the active event once its clip window has been recorded."""
         if self.event is None or now < self.event.end:
             return None
         ev, self.event = self.event, None

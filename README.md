@@ -5,15 +5,15 @@
 - **Cameras:** USB webcams, RTSP, HTTP(S) MJPEG/HLS streams, JPEG snapshot URLs, and video files (for testing). Any number of cameras can run at once.
 - **Person detection:** Ultralytics YOLO11, batched across all cameras on the GPU.
 - **Face recognition:** OpenCV Model Zoo **YuNet** (detection) + **SFace** (recognition). Both are fully FOSS (Apache-2.0/MIT) and run through `cv2.dnn`.
-- **Telegram alerts** include a 5-second H.264 clip: 2s before the person appeared and 3s after. The caption names everyone seen (🟢 trusted, 🟠 known, 🔴 unknown).
+- **Telegram alerts** include a 5-second H.264 clip, starting the moment the person is detected. The caption names everyone seen (🟢 trusted, 🟠 known, 🔴 unknown).
 - **Trusted people** don't trigger alerts. Unknown faces are saved so you can label them later from Telegram or the CLI.
 - **Interactive dashboard** with menus. A headless mode is available for running as a service.
 
 ## How alerts are decided
 
 1. YOLO sees a person on **2 consecutive inferences**, which filters out one-frame false positives.
-2. Recording starts **2s before** that moment, using a per-camera ring buffer.
-3. For the next **3s**, detection and face recognition keep running. Each face observation votes on the identity of its tracked person.
+2. Recording starts at the moment the person was **first detected**. A per-camera ring buffer supplies the frames from before the confirmation. Set `events.pre_seconds` to also include time before detection.
+3. For the next **5s**, detection and face recognition keep running. Each face observation votes on the identity of its tracked person.
 4. When the clip ends:
    - If **everyone** seen is a trusted person (confirmed by at least `trusted_min_matches` consistent face matches), **no alert** is sent.
    - Otherwise an alert is sent, unless every non-trusted person is still in their **per-person, per-camera cooldown** (default 60s).
@@ -115,10 +115,11 @@ Logs are written to `data/logs/camwatch.log` (rotated), every event to `data/eve
 
 | Symptom | Setting |
 |---|---|
+| USB webcam stuck at 640×360 / 640×480 on Windows | Menu → Cameras → *camera* → **Resolution** (e.g. 1920x1080). If it still doesn't change, try **Pixel format / capture backend** → MJPG, or backend msmf. The Cameras table shows `640x360 (asked 1920x1080)` when the camera ignores the request |
 | Alerts for people on the street far away | `detection.min_box_height: 0.15` |
 | Wrong name assigned | Raise `face.match_threshold` (0.45–0.5) and enroll more varied samples |
 | Known person shown as unknown | Enroll more samples (different light and angles), or lower `match_threshold` slightly (not below 0.36) |
-| Trusted person still triggers alerts | Their face isn't seen clearly during the 3s window. Lower `face.min_face_px`, raise `events.post_seconds`, or mount the camera at face height |
+| Trusted person still triggers alerts | Their face isn't seen clearly during the 5s window. Lower `face.min_face_px`, raise `events.post_seconds`, or mount the camera at face height |
 | Too many alerts for someone lingering | Raise `events.cooldown_seconds` |
 | GPU overloaded | `detection.model: yolo11n.pt`, or lower `detection.detect_fps` |
 

@@ -24,6 +24,8 @@ class CameraConfig:
     backend: str = "auto"
     width: int = 0  # requested capture size for USB cameras (0 = driver default)
     height: int = 0
+    # USB pixel format: auto (MJPG on Windows) | MJPG | YUY2 | none
+    fourcc: str = "auto"
     snapshot_fps: float = 2.0
 
 
@@ -51,8 +53,8 @@ class FaceConfig:
 
 @dataclass
 class EventConfig:
-    pre_seconds: float = 2.0
-    post_seconds: float = 3.0
+    pre_seconds: float = 0.0  # clip starts this long before the person was first detected
+    post_seconds: float = 5.0  # ...and runs this long after (identification continues meanwhile)
     cooldown_seconds: float = 60.0
     track_ttl: float = 2.0  # seconds a track survives without detections
 

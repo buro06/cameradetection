@@ -161,9 +161,19 @@ class CameraStream(threading.Thread):
             if backend is None:
                 backend = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
             cap = cv2.VideoCapture(int(src), backend)
+            fourcc = self.cfg.fourcc.strip().upper()
+            if fourcc == "AUTO":
+                # DirectShow opens in the driver's default (often low-res YUY2) mode; HD needs MJPG over USB 2.0
+                fourcc = "MJPG" if sys.platform == "win32" else ""
+            if len(fourcc) == 4 and fourcc != "NONE":
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))  # must come before the size
             if self.cfg.width and self.cfg.height:
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.cfg.width)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.cfg.height)
+                got = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+                if cap.isOpened() and got != (self.cfg.width, self.cfg.height):
+                    log.warning("[%s] requested %dx%d but camera delivers %dx%d (try another backend/fourcc)",
+                                self.cfg.name, self.cfg.width, self.cfg.height, *got)
             return cap, False
         is_file = Path(src).exists()
         params = [] if is_file else [
