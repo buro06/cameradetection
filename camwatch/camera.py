@@ -23,6 +23,8 @@ log = logging.getLogger(__name__)
 STALE_SECONDS = 10.0
 OPEN_TIMEOUT_MS = 10000
 READ_TIMEOUT_MS = 10000
+FPS_CHECK_SECONDS = 5.0  # after this long, compare the measured USB frame rate with the requested one
+FPS_SHORTFALL = 0.6  # ...and warn below this share of it
 
 _BACKENDS = {
     "dshow": cv2.CAP_DSHOW,
@@ -37,6 +39,11 @@ def set_rtsp_transport(transport: str) -> None:
     """Must run before any FFMPEG capture is opened (process-wide setting)."""
     if transport:
         os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", f"rtsp_transport;{transport}")
+
+
+def _fourcc_text(code: int) -> str:
+    text = "".join(chr((code >> 8 * i) & 0xFF) for i in range(4))
+    return text if code and text.isprintable() else "unknown format"
 
 
 def describe_source(source: str) -> str:
@@ -165,8 +172,9 @@ class CameraStream(threading.Thread):
             if fourcc == "AUTO":
                 # DirectShow opens in the driver's default (often low-res YUY2) mode; HD needs MJPG over USB 2.0
                 fourcc = "MJPG" if sys.platform == "win32" else ""
-            if len(fourcc) == 4 and fourcc != "NONE":
-                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))  # must come before the size
+            want_fourcc = cv2.VideoWriter_fourcc(*fourcc) if len(fourcc) == 4 and fourcc != "NONE" else 0
+            if want_fourcc:
+                cap.set(cv2.CAP_PROP_FOURCC, want_fourcc)  # must come before the size
             if self.cfg.width and self.cfg.height:
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.cfg.width)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.cfg.height)
@@ -174,6 +182,21 @@ class CameraStream(threading.Thread):
                 if cap.isOpened() and got != (self.cfg.width, self.cfg.height):
                     log.warning("[%s] requested %dx%d but camera delivers %dx%d (try another backend/fourcc)",
                                 self.cfg.name, self.cfg.width, self.cfg.height, *got)
+            if self.cfg.fps > 0:
+                cap.set(cv2.CAP_PROP_FPS, self.cfg.fps)
+            # DirectShow restarts the device on an FPS change and can fall back to uncompressed YUY2,
+            # which USB 2.0 can only carry at ~5 fps in 1080p; ask for the format again if it was lost.
+            have = max(0, int(cap.get(cv2.CAP_PROP_FOURCC)))
+            if want_fourcc and have and have != want_fourcc:
+                cap.set(cv2.CAP_PROP_FOURCC, want_fourcc)
+                have = max(0, int(cap.get(cv2.CAP_PROP_FOURCC)))
+                if have != want_fourcc:
+                    log.warning("[%s] camera ignored pixel format %s and uses %s (try Pixel format / backend in the menu)",
+                                self.cfg.name, fourcc, _fourcc_text(have))
+            if cap.isOpened():
+                log.info("[%s] USB camera opened: %dx%d %s @ %.0f fps (driver-reported)", self.cfg.name,
+                         cap.get(cv2.CAP_PROP_FRAME_WIDTH), cap.get(cv2.CAP_PROP_FRAME_HEIGHT),
+                         _fourcc_text(have), cap.get(cv2.CAP_PROP_FPS))
             return cap, False
         is_file = Path(src).exists()
         params = [] if is_file else [
@@ -191,6 +214,7 @@ class CameraStream(threading.Thread):
         file_interval = 1.0 / (cap.get(cv2.CAP_PROP_FPS) or 25.0) if is_file else 0.0
         failures = 0
         next_due = time.monotonic()
+        fps_check_at = next_due + FPS_CHECK_SECONDS if self.cfg.fps > 0 and not is_file else None
         try:
             while not self._halt.is_set():
                 ok, frame = cap.read()
@@ -205,6 +229,12 @@ class CameraStream(threading.Thread):
                     continue
                 failures = 0
                 self._on_frame(frame)
+                if fps_check_at and time.monotonic() >= fps_check_at:
+                    fps_check_at = None
+                    if self.fps < FPS_SHORTFALL * self.cfg.fps:
+                        log.warning("[%s] asked for %.0f fps but receiving %.1f fps; common causes: uncompressed "
+                                    "format (set Pixel format → MJPG) or a dim room (camera lengthens exposure)",
+                                    self.cfg.name, self.cfg.fps, self.fps)
                 if is_file:
                     next_due += file_interval
                     delay = next_due - time.monotonic()

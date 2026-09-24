@@ -195,6 +195,7 @@ def cameras_menu(engine: Engine, console: Console) -> None:
 
 
 RESOLUTIONS = [(640, 480), (1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)]
+FRAME_RATES = [15, 24, 25, 30, 60]
 
 
 def is_usb(cam: CameraConfig) -> bool:
@@ -228,6 +229,27 @@ def pick_resolution(cam: CameraConfig, mark_current: bool = True) -> bool | None
         pick = tuple(int(v) for v in re.split(r"[xX]", raw.replace(" ", "")))
     changed = (cam.width, cam.height) != pick
     cam.width, cam.height = pick
+    return changed
+
+
+def pick_fps(cam: CameraConfig) -> bool | None:
+    """Ask for a USB capture frame rate. None = cancelled, else whether it changed."""
+    mark = lambda f: "  ← current" if f == cam.fps else ""  # noqa: E731
+    choices = [questionary.Choice(f"Camera default{mark(0)}", 0.0)]
+    choices += [questionary.Choice(f"{f} fps{mark(f)}", float(f)) for f in FRAME_RATES]
+    choices.append(questionary.Choice("Custom…", "custom"))
+    default = cam.fps if cam.fps == 0 or cam.fps in FRAME_RATES else "custom"
+    pick = _select("Capture frame rate (USB cameras only):", choices, default=default)
+    if pick is None:
+        return None
+    if pick == "custom":
+        raw = _text("Frames per second:", default=f"{cam.fps or 30:g}",
+                    validate=lambda s: bool(re.fullmatch(r"\s*\d{1,3}(\.\d+)?\s*", s)) and 0 < float(s) <= 240 or "1–240")
+        if not raw:
+            return None
+        pick = float(raw)
+    changed = cam.fps != pick
+    cam.fps = pick
     return changed
 
 
@@ -267,6 +289,14 @@ def _report_resolution(console: Console, cam: CameraConfig, got: tuple[int, int]
                       "Try another resolution, or Pixel format → MJPG / backend → msmf.")
     else:
         console.print(f"[green]OK[/] — {got[0]}x{got[1]}")
+
+
+def _report_fps(console: Console, cam: CameraConfig, measured: float) -> None:
+    if cam.fps and measured < 0.6 * cam.fps:
+        console.print(f"[yellow]Receiving {measured:.1f} fps, not the requested {cam.fps:g}.[/] "
+                      "Try Pixel format → MJPG, or add light (webcams slow down in dim rooms).")
+    else:
+        console.print(f"Frame rate: {measured:.1f} fps")
 
 
 def add_camera_flow(cfg: AppConfig, console: Console, source: str | None = None) -> CameraConfig | None:
@@ -317,7 +347,7 @@ def scan_usb(cfg: AppConfig, console: Console) -> CameraConfig | None:
 
 def camera_actions(engine: Engine, console: Console, cam: CameraConfig) -> None:
     cfg = engine.cfg
-    usb_actions = ["📐  Resolution", "🎛   Pixel format / capture backend"] if is_usb(cam) else []
+    usb_actions = ["📐  Resolution", "🎞   Frame rate", "🎛   Pixel format / capture backend"] if is_usb(cam) else []
     action = _select(f"{cam.name}:", ["📸  Snapshot", "✏️   Edit source", *usb_actions,
                                       "⏯   Disable" if cam.enabled else "⏯   Enable", "🗑   Remove", BACK])
     if action is None or action == BACK:
@@ -326,16 +356,21 @@ def camera_actions(engine: Engine, console: Console, cam: CameraConfig) -> None:
         if not save_snapshots(engine, cameras=[cam.name]):
             console.print("[yellow]No frame available.[/]")
             _pause()
-    elif "Resolution" in action or "Pixel format" in action:
-        changed = pick_resolution(cam) if "Resolution" in action else pick_usb_format(cam)
+    elif "Resolution" in action or "Frame rate" in action or "Pixel format" in action:
+        picker = pick_resolution if "Resolution" in action else pick_fps if "Frame rate" in action else pick_usb_format
+        changed = picker(cam)
         if changed:
             cfg.save()
             engine.apply_camera(cam)
             if cam.enabled:
                 with console.status("Reopening camera …"):
                     got = _wait_resolution(engine, cam.name)
+                    if got:
+                        time.sleep(3)  # let the frame-rate average settle
                 if got:
                     _report_resolution(console, cam, got)
+                    if stream := engine.streams.get(cam.name):
+                        _report_fps(console, cam, stream.fps)
                 else:
                     console.print("[yellow]No frame yet — check the dashboard/log.[/]")
                 _pause()
