@@ -1,0 +1,58 @@
+# camwatch configuration. Copy to config.yaml (or run `camwatch setup`).
+# Most settings can also be changed live from the dashboard menu (press m → Settings).
+
+data_dir: data            # models, face DB, clips, logs (relative to this file)
+rtsp_transport: tcp       # tcp is more reliable than udp over Wi-Fi
+
+detection:
+  model: yolo11s.pt       # yolo11n.pt = faster, yolo11m.pt = more accurate; auto-downloaded to data/models
+  device: auto            # auto | cuda:0 | cpu
+  confidence: 0.5
+  imgsz: 640
+  detect_fps: 5.0         # inferences per second per camera
+  half: false             # keep false on Maxwell GPUs (Quadro M4000): no fast FP16
+  min_hits: 2             # detections before a person is considered real (filters flickers)
+  min_box_height: 0.0     # ignore people smaller than this fraction of frame height (e.g. 0.1)
+
+face:
+  detector_score: 0.85
+  min_face_px: 40         # faces smaller than this are not recognised
+  match_threshold: 0.40   # SFace cosine similarity; raise to 0.45 for fewer false matches
+  trusted_min_matches: 2  # consistent matches needed before a trusted face suppresses an alert
+  save_unknowns: true
+  max_unknown_images: 5
+
+events:
+  pre_seconds: 2.0        # clip starts this long before the person appeared
+  post_seconds: 3.0       # ...and ends this long after (identification continues meanwhile)
+  cooldown_seconds: 60    # per person, per camera
+  track_ttl: 2.0
+
+clip:
+  fps: 15
+  max_width: 1280
+  crf: 28                 # H.264 quality (lower = better/larger)
+  annotate: true
+  retention_days: 14
+
+telegram:
+  enabled: true
+  bot_token: ""           # or set env var CAMWATCH_TELEGRAM_TOKEN (preferred)
+  chat_ids: []            # chats that receive alerts (use `camwatch setup` to discover)
+  allowed_user_ids: []    # users allowed to send commands from any chat
+  send_unknown_faces: true
+
+cameras:
+  - name: front-door
+    source: "rtsp://user:password@192.168.1.20:554/Streaming/Channels/102"
+  - name: desk
+    source: "0"           # USB webcam index
+    backend: auto         # Windows: dshow (default) or msmf
+    width: 1280
+    height: 720
+  - name: garage
+    source: "http://192.168.1.30/snapshot.jpg"   # JPEG snapshot URL (polled)
+    snapshot_fps: 2
+  # - name: porch
+  #   source: "https://192.168.1.40:8080/video"  # MJPEG / HLS / any FFmpeg-readable stream
+  #   enabled: false
