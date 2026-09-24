@@ -99,6 +99,15 @@ Commands queued while camwatch was offline (older than 5 minutes) are ignored.
 
 ## Running 24/7 on Windows
 
+**Simplest: the watcher script.** Double-click `run-camwatch.cmd` in the camwatch folder, or run it from a cmd window. It activates `.venv`, starts camwatch, and restarts it in the same window whenever it exits, whether it crashed or you pressed `q`:
+
+```bat
+run-camwatch                  :: live dashboard
+run-camwatch run --headless   :: no dashboard
+```
+
+After camwatch exits, the watcher waits 10 s before restarting. Press `R` to restart now or `Q` to stop. If camwatch keeps failing within a minute of starting, the wait grows up to 5 minutes. Restarts are logged to `data\logs\watcher.log`. To start the watcher at log on, put a shortcut to it in `shell:startup`.
+
 **Option A: NSSM service** (starts at boot, restarts on crash):
 
 ```powershell
