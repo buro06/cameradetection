@@ -1,18 +1,29 @@
 """Per-camera person tracking, face voting, event lifecycle and alert decisions.
 
+Alerts are about *changes*, not presence: a person alerts when they arrive (or when their identity
+becomes known as someone new), never again just for staying in view.
+
 Event lifecycle:
-  1. A confirmed person track needs attention (new, identity changed, or cooldown expired).
+  1. A confirmed person track needs attention: it is new, or its identity changed to one not yet evaluated.
   2. Recording starts `pre_seconds` before the person was first detected (default 0: at detection; the
      ring buffer still supplies the frames between first detection and confirmation).
   3. For `post_seconds` detection + face recognition keep running and faces vote on each track.
-  4. The event is finalized: no alert if every person is a confirmed trusted face, otherwise
-     alert unless every non-trusted identity is still inside its per-camera cooldown.
+  4. The event is finalized, looking only at the people who were new in it: no alert if they are all
+     confirmed trusted, otherwise alert unless each of them is the same identity (name or unknown-face
+     cluster) that already alerted on this camera within the cooldown (i.e. left and came back).
+
+People who are briefly hidden (occluded on a couch, detection flicker) are re-attached to their old
+track instead of counting as new arrivals — but only if they were standing/sitting still when lost.
+Someone who was moving when lost is assumed to have left, so a newcomer walking into the same spot or
+through the same doorway is never mistaken for them.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -26,6 +37,11 @@ log = logging.getLogger(__name__)
 
 LOCKED_VOTES = 5  # once a track has this many consistent votes, only re-check its face occasionally
 RECHECK_SECONDS = 2.0
+REVIVE_IOU = 0.5  # how closely a reappearing person must overlap where a lost track was
+STATIONARY_WINDOW = 2.0  # seconds of history used to decide whether a lost track was still
+STATIONARY_MOVE = 0.15  # max centre movement (fraction of box height) to count as still
+OVERLAP_CONTAINMENT = 0.6  # box this much inside someone already tracked = possible duplicate detection
+OVERLAP_PRESENCE = 0.6  # ...which must then be detected in this share of frames during the hold time
 
 
 @dataclass
@@ -35,29 +51,60 @@ class Track:
     first_seen: float
     last_seen: float
     hits: int = 1
+    confirmed: bool = False  # counts as a real person (stays true for the life of the track)
     votes: dict[str, list[float]] = field(default_factory=dict)
     unknown_faces: int = 0
     best_unknown: FaceObs | None = None
     best_known: dict[str, FaceObs] = field(default_factory=dict)
     last_face_check: float = 0.0
     unknown_id: int | None = None
-    evaluated_key: str | None = None
-    evaluated_at: float = 0.0
+    seen_keys: set[str] = field(default_factory=set)  # identities already evaluated for this track
+    confirmed_trusted: str | None = None
+    path: deque = field(default_factory=lambda: deque(maxlen=30))  # (t, cx, cy)
 
     def resolve(self, trusted_map: dict[str, bool], trusted_min: int) -> tuple[str | None, bool]:
-        """(name or None, trusted-and-confirmed). A name wins only with a majority of face observations."""
+        """(name or None, trusted-and-confirmed). A name wins only with a majority of face observations.
+        Once confirmed trusted, a track stays trusted while tracked (faces turned away on a couch fail to
+        match often), unless another known person's face outvotes them."""
+        sticky = self.confirmed_trusted
+        if sticky and trusted_map.get(sticky):
+            if all(len(v) <= len(self.votes[sticky]) for k, v in self.votes.items() if k != sticky):
+                return sticky, True
         if self.votes:
             name, scores = max(self.votes.items(), key=lambda kv: (len(kv[1]), max(kv[1])))
             others = sum(len(v) for k, v in self.votes.items() if k != name) + self.unknown_faces
             if len(scores) > others and name in trusted_map:
-                return name, trusted_map[name] and len(scores) >= trusted_min
+                trusted = trusted_map[name] and len(scores) >= trusted_min
+                if trusted:
+                    self.confirmed_trusted = name
+                return name, trusted
         return None, False
 
     def key(self, trusted_map: dict[str, bool], trusted_min: int) -> str:
+        """Identity used for cooldowns: a name, an unknown-face cluster, or this track itself when no
+        face has been seen (so two faceless strangers never share a cooldown)."""
         name, _ = self.resolve(trusted_map, trusted_min)
         if name:
             return f"person:{name}"
-        return f"unknown:{self.unknown_id}" if self.unknown_id else "unknown"
+        return f"unknown:{self.unknown_id}" if self.unknown_id else f"track:{self.id}"
+
+    def was_still(self) -> bool:
+        recent = [(t, x, y) for t, x, y in self.path if t >= self.last_seen - STATIONARY_WINDOW]
+        if len(recent) < 2:
+            return True
+        (_, x0, y0), (_, x1, y1) = recent[0], recent[-1]
+        return math.hypot(x1 - x0, y1 - y0) <= STATIONARY_MOVE * (self.box[3] - self.box[1])
+
+    def observe(self, box: np.ndarray, now: float) -> None:
+        self.box, self.last_seen = box, now
+        self.path.append((now, (box[0] + box[2]) / 2, (box[1] + box[3]) / 2))
+
+
+def _containment(a: np.ndarray, b: np.ndarray) -> float:
+    """Share of the smaller box that lies inside the other (catches nested and same-size duplicates)."""
+    inter = max(0.0, min(a[2], b[2]) - max(a[0], b[0])) * max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    smaller = min((a[2] - a[0]) * (a[3] - a[1]), (b[2] - b[0]) * (b[3] - b[1]))
+    return inter / smaller if smaller > 0 else 0.0
 
 
 def _iou(a: np.ndarray, b: np.ndarray) -> float:
@@ -96,11 +143,16 @@ def assign_faces(faces: list[FaceObs], tracks: list[Track]) -> list[tuple[Track,
 
 
 class Tracker:
-    """Greedy IoU tracker; good enough at ~5 inference FPS for people walking."""
+    """Greedy IoU tracker; good enough at ~5 inference FPS for people walking.
 
-    def __init__(self, ttl: float):
+    Tracks unseen for `ttl` seconds are dropped, but still ones are remembered for `memory` seconds and
+    revived if a person reappears in the same place (occlusion on a couch, detection flicker)."""
+
+    def __init__(self, ttl: float, memory: float = 30.0):
         self.ttl = ttl
+        self.memory = memory
         self.tracks: dict[int, Track] = {}
+        self.lost: dict[int, Track] = {}
         self._next = 1
 
     def update(self, dets: np.ndarray, now: float) -> list[Track]:
@@ -122,17 +174,39 @@ class Tracker:
             used_t.add(tid)
             used_d.add(di)
             t = self.tracks[tid]
-            t.box, t.last_seen, t.hits = dets[di][:4].copy(), now, t.hits + 1
+            t.observe(dets[di][:4].copy(), now)
+            t.hits += 1
             seen.append(t)
         for di, d in enumerate(dets):
-            if di not in used_d:
+            if di in used_d:
+                continue
+            t = self._revive(d[:4], now)
+            if t is None:
                 t = Track(id=self._next, box=d[:4].copy(), first_seen=now, last_seen=now)
                 self._next += 1
-                self.tracks[t.id] = t
-                seen.append(t)
+            else:
+                t.hits += 1
+            t.observe(d[:4].copy(), now)
+            self.tracks[t.id] = t
+            seen.append(t)
         for tid in [tid for tid, t in self.tracks.items() if now - t.last_seen > self.ttl]:
-            del self.tracks[tid]
+            t = self.tracks.pop(tid)
+            if self.memory > 0 and t.was_still():
+                self.lost[tid] = t
+        for tid in [tid for tid, t in self.lost.items() if now - t.last_seen > self.memory]:
+            del self.lost[tid]
         return seen
+
+    def _revive(self, box: np.ndarray, now: float) -> Track | None:
+        best, best_iou = None, REVIVE_IOU
+        for t in self.lost.values():
+            iou = _iou(t.box, box)
+            if iou >= best_iou:
+                best, best_iou = t, iou
+        if best is not None:
+            del self.lost[best.id]
+            log.debug("revived track %d (lost %.1fs, IoU %.2f)", best.id, now - best.last_seen, best_iou)
+        return best
 
 
 @dataclass
@@ -143,6 +217,7 @@ class PersonInfo:
     key: str
     unknown_id: int | None
     face: FaceObs | None
+    new: bool = True  # arrived / newly identified in this event (vs. already present)
 
     @property
     def label(self) -> str:
@@ -157,7 +232,7 @@ class PersonInfo:
 class EventResult:
     camera: str
     wall_time: float
-    decision: str  # alert | trusted | cooldown | disarmed
+    decision: str  # alert | trusted | cooldown | disarmed | unchanged
     people: list[PersonInfo]
     frames: list[BufferedFrame]
     start: float
@@ -190,7 +265,7 @@ class CameraMonitor:
         self.faces = faces
         self.db = db
         self.is_armed = is_armed
-        self.tracker = Tracker(cfg.events.track_ttl)
+        self.tracker = Tracker(cfg.events.track_ttl, cfg.events.lost_memory_seconds)
         self.event: _Event | None = None
         self.cooldowns: dict[str, float] = {}
         self.visible: list[str] = []
@@ -212,11 +287,14 @@ class CameraMonitor:
         det_cfg, face_cfg = self.cfg.detection, self.cfg.face
         if det_cfg.min_box_height > 0 and len(dets):
             dets = dets[(dets[:, 3] - dets[:, 1]) >= det_cfg.min_box_height * frame.shape[0]]
+        self.tracker.ttl, self.tracker.memory = self.cfg.events.track_ttl, self.cfg.events.lost_memory_seconds  # live edits
         seen = self.tracker.update(dets, now)
         trusted_map = self.db.trusted_map()
+        pending = self._confirm(seen, now)
+        people = [t for t in seen if t.id not in pending]  # split-second duplicates can't claim faces
 
         check = []
-        for t in seen:
+        for t in people:
             name, _ = t.resolve(trusted_map, face_cfg.trusted_min_matches)
             locked = name is not None and len(t.votes[name]) >= LOCKED_VOTES
             if not locked or now - t.last_face_check >= RECHECK_SECONDS:
@@ -227,7 +305,7 @@ class CameraMonitor:
             for obs in self.faces.analyze(frame, tuple(t.box), max_faces=3):
                 if all(_iou(np.array(obs.box, float), np.array(c.box, float)) < 0.5 for c in candidates):
                     candidates.append(obs)
-        for t, obs in assign_faces(candidates, seen):
+        for t, obs in assign_faces(candidates, people):
             if t not in check:
                 continue
             m = self.db.match(obs.embedding)
@@ -241,7 +319,7 @@ class CameraMonitor:
                 if t.best_unknown is None or obs.quality > t.best_unknown.quality:
                     t.best_unknown = obs
 
-        confirmed = [t for t in seen if t.hits >= det_cfg.min_hits]
+        confirmed = [t for t in seen if t.confirmed]
         self.stream.set_overlay(Overlay(now, [(t.id, tuple(t.box)) for t in confirmed]))
         self.visible = [self._label(t, trusted_map) for t in confirmed]
 
@@ -257,6 +335,37 @@ class CameraMonitor:
             for t in confirmed:
                 self.event.tracks[t.id] = t
 
+    def _confirm(self, seen: list[Track], now: float) -> set[int]:
+        """Decide which tracks count as real people. Returns ids of tracks held back as likely duplicates.
+
+        A new person standing apart confirms after `min_hits` detections, so quick visits still alert.
+        A box on top of someone already tracked is usually a split-second duplicate detection (YOLO boxing
+        the same person twice), so it must be seen in most frames for `overlap_confirm_seconds` first."""
+        det_cfg = self.cfg.detection
+        established = [t for t in seen if t.confirmed]
+        pending: set[int] = set()
+        # bigger / steadier boxes first, so when a person arrives with two boxes the real one wins
+        candidates = sorted((t for t in seen if not t.confirmed and t.hits >= det_cfg.min_hits),
+                            key=lambda t: (-t.hits, -(t.box[2] - t.box[0]) * (t.box[3] - t.box[1])))
+        for t in candidates:
+            if any(_containment(t.box, o.box) >= OVERLAP_CONTAINMENT for o in established) \
+                    and not self._persisted(t, now):
+                pending.add(t.id)
+                continue
+            t.confirmed = True
+            established.append(t)
+        return pending
+
+    def _persisted(self, t: Track, now: float) -> bool:
+        hold = self.cfg.detection.overlap_confirm_seconds
+        if hold <= 0:
+            return True
+        # seen in most frames of the window AND across all of it (a 3-frame flicker spans only ~0.4 s)
+        frame = 1.0 / max(self.cfg.detection.detect_fps, 0.1)
+        recent = [ts for ts, _, _ in t.path if ts >= now - hold - frame / 2]
+        needed = max(self.cfg.detection.min_hits, OVERLAP_PRESENCE * hold * self.cfg.detection.detect_fps)
+        return len(recent) >= needed and now - recent[0] >= hold - frame
+
     def tick(self, now: float) -> EventResult | None:
         """Finish the active event once its clip window has been recorded."""
         if self.event is None or now < self.event.end:
@@ -270,14 +379,8 @@ class CameraMonitor:
         return f"{name}{' ✓' if trusted else ''}" if name else "unknown"
 
     def _needs_event(self, t: Track, trusted_map: dict[str, bool], now: float) -> bool:
-        key = t.key(trusted_map, self.cfg.face.trusted_min_matches)
-        if key != t.evaluated_key:
-            return True
-        _, trusted = t.resolve(trusted_map, self.cfg.face.trusted_min_matches)
-        if trusted:
-            return False
-        last = max(t.evaluated_at, self.cooldowns.get(key, 0.0))
-        return now - last >= self.cfg.events.cooldown_seconds
+        """New people and identities not yet evaluated need an event; people who stay never re-trigger."""
+        return t.key(trusted_map, self.cfg.face.trusted_min_matches) not in t.seen_keys
 
     def _finalize(self, ev: _Event, now: float) -> EventResult:
         face_cfg = self.cfg.face
@@ -291,20 +394,24 @@ class CameraMonitor:
                     t.unknown_id = self.db.record_unknown(b.embedding, b.crop, b.quality, self.name, face_cfg.max_unknown_images)
             key = t.key(trusted_map, face_cfg.trusted_min_matches)
             face = t.best_known.get(name) if name else t.best_unknown
-            people.append(PersonInfo(t.id, name, trusted, key, None if name else t.unknown_id, face))
-            t.evaluated_key, t.evaluated_at = key, now
+            new = key not in t.seen_keys
+            t.seen_keys.add(key)
+            people.append(PersonInfo(t.id, name, trusted, key, None if name else t.unknown_id, face, new))
 
+        # Only people who are new in this event can cause an alert; the others are listed as context.
         cooldown = self.cfg.events.cooldown_seconds
-        untrusted = [p for p in people if not p.trusted]
-        if not untrusted:
+        new_untrusted = [p for p in people if p.new and not p.trusted]
+        if not any(p.new for p in people):
+            decision = "unchanged"
+        elif not new_untrusted:
             decision = "trusted"
         elif not self.is_armed(self.name):
             decision = "disarmed"
-        elif all(now - self.cooldowns.get(p.key, -1e9) < cooldown for p in untrusted):
-            decision = "cooldown"
+        elif all(now - self.cooldowns.get(p.key, -1e9) < cooldown for p in new_untrusted):
+            decision = "cooldown"  # same identities left and came back within the cooldown
         else:
             decision = "alert"
-            for p in untrusted:
+            for p in new_untrusted:
                 self.cooldowns[p.key] = now
 
         result = EventResult(self.name, ev.wall, decision, people, ev.recording.frames, ev.start, ev.end, ev.anchor)

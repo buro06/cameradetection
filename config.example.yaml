@@ -13,6 +13,8 @@ detection:
   half: false             # keep false on Maxwell GPUs (Quadro M4000): no fast FP16
   min_hits: 2             # detections before a person is considered real (filters flickers)
   min_box_height: 0.0     # ignore people smaller than this fraction of frame height (e.g. 0.1)
+  overlap_confirm_seconds: 1.0  # a box on top of someone already tracked must last this long to count
+                                # as another person (filters split-second duplicate boxes; 0 = off)
 
 face:
   detector_score: 0.85
@@ -25,8 +27,9 @@ face:
 events:
   pre_seconds: 0.0        # clip starts this long before the person was first detected (0 = at detection)
   post_seconds: 5.0       # ...and runs this long after; alerts are decided at the end of this window
-  cooldown_seconds: 60    # per person, per camera
+  cooldown_seconds: 60    # same person leaving and returning within this time doesn't re-alert (per camera)
   track_ttl: 2.0
+  lost_memory_seconds: 30 # a still person hidden this long and reappearing in place isn't a new arrival
 
 clip:
   fps: 15

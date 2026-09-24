@@ -39,6 +39,8 @@ class DetectionConfig:
     half: bool = False  # Maxwell GPUs (e.g. Quadro M4000) have no fast FP16
     min_hits: int = 2  # detections needed before a track counts as a real person
     min_box_height: float = 0.0  # ignore people smaller than this fraction of frame height
+    # a box on top of someone already tracked must persist this long to count (filters duplicate boxes)
+    overlap_confirm_seconds: float = 1.0
 
 
 @dataclass
@@ -55,8 +57,9 @@ class FaceConfig:
 class EventConfig:
     pre_seconds: float = 0.0  # clip starts this long before the person was first detected
     post_seconds: float = 5.0  # ...and runs this long after (identification continues meanwhile)
-    cooldown_seconds: float = 60.0
+    cooldown_seconds: float = 60.0  # same person leaving and coming back within this time doesn't re-alert
     track_ttl: float = 2.0  # seconds a track survives without detections
+    lost_memory_seconds: float = 30.0  # a still person hidden this long and reappearing in place isn't "new"
 
 
 @dataclass

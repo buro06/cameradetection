@@ -17,7 +17,8 @@ from rich.text import Text
 
 from .engine import Engine
 
-DECISION_STYLE = {"alert": "bold red", "trusted": "green", "cooldown": "yellow", "disarmed": "dim"}
+DECISION_STYLE = {"alert": "bold red", "trusted": "green", "cooldown": "yellow", "disarmed": "dim",
+                  "unchanged": "dim"}
 
 
 class LogBuffer(logging.Handler):

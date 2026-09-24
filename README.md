@@ -11,14 +11,21 @@
 
 ## How alerts are decided
 
-1. YOLO sees a person on **2 consecutive inferences**, which filters out one-frame false positives.
+1. YOLO sees a person on **2 inferences**, which filters out one-frame false positives. A box that appears *on top of* someone already tracked must last about **1 second** (`detection.overlap_confirm_seconds`) before it counts as another person. YOLO sometimes boxes the same person twice for a split second, and this stops that from turning into a phantom "Unknown person".
 2. Recording starts at the moment the person was **first detected**. A per-camera ring buffer supplies the frames from before the confirmation. Set `events.pre_seconds` to also include time before detection.
 3. For the next **5s**, detection and face recognition keep running. Each face observation votes on the identity of its tracked person.
-4. When the clip ends:
-   - If **everyone** seen is a trusted person (confirmed by at least `trusted_min_matches` consistent face matches), **no alert** is sent.
-   - Otherwise an alert is sent, unless every non-trusted person is still in their **per-person, per-camera cooldown** (default 60s).
-   - A new or unknown person always alerts, even while someone else is in cooldown.
-   - A person whose face is never visible counts as *unknown*, and alerts.
+4. When the clip ends, only the people who are **new** in this clip are considered. Everyone already present is listed in the caption for context but can't cause an alert.
+   - If all the new people are trusted (confirmed by at least `trusted_min_matches` consistent face matches), **no alert** is sent.
+   - Otherwise an alert is sent. The exception is a known person or known unknown face that **left and came back** within `events.cooldown_seconds` (default 60s) on that camera.
+   - A person whose face is never visible counts as *unknown* and alerts. Each such person is tracked separately, so a second stranger always alerts.
+   - A quick visit alerts too, even if the person leaves before the clip ends.
+
+**People who stay are never re-alerted.** A group sitting on the couch alerts once, when they arrive.
+- **Briefly hidden people:** someone who was sitting or standing still and vanishes for a while (someone walks in front, they lean out of view) is re-attached to their original track when they reappear in the same spot. This applies for up to `events.lost_memory_seconds`, default 30s.
+- **People who leave:** someone who was *moving* when they disappeared is treated as gone. A newcomer stepping into that spot or through the same doorway is always treated as new.
+- **Trusted people who look away:** once confirmed, a trusted person stays trusted while they're tracked, even when their face is turned away. The exception is when a *different* known person's face starts to outvote them.
+
+If a household member walks in with their face turned away, you get one "Unknown person (face not visible)" alert. Nothing further comes once they sit down.
 
 Several safety rules keep a trusted face from silencing an alert for someone else:
 - A face only counts for the person whose head position it matches.
@@ -120,7 +127,9 @@ Logs are written to `data/logs/camwatch.log` (rotated), every event to `data/eve
 | Wrong name assigned | Raise `face.match_threshold` (0.45–0.5) and enroll more varied samples |
 | Known person shown as unknown | Enroll more samples (different light and angles), or lower `match_threshold` slightly (not below 0.36) |
 | Trusted person still triggers alerts | Their face isn't seen clearly during the 5s window. Lower `face.min_face_px`, raise `events.post_seconds`, or mount the camera at face height |
-| Too many alerts for someone lingering | Raise `events.cooldown_seconds` |
+| Duplicate boxes on one person / phantom "Unknown person (face not visible)" alerts | Raise `detection.overlap_confirm_seconds` (e.g. 2) |
+| Same person alerts again after briefly stepping out | Raise `events.cooldown_seconds` (only applies to recognised faces / unknown-face clusters) |
+| Someone who stays still gets "new" alerts after being hidden a long time | Raise `events.lost_memory_seconds` |
 | GPU overloaded | `detection.model: yolo11n.pt`, or lower `detection.detect_fps` |
 
 All settings are documented in `config.example.yaml`.
