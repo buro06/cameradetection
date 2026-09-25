@@ -12,6 +12,9 @@ Event lifecycle:
      confirmed trusted, otherwise alert unless each of them is the same identity (name or unknown-face
      cluster) that already alerted on this camera within the cooldown (i.e. left and came back).
 
+ByteTrack keeps each person on one track while they move; faces too small, blurry or turned away to
+identify reliably are ignored, so they can neither name the wrong person nor spawn extra unknowns.
+
 People who are briefly hidden (occluded on a couch, detection flicker) are re-attached to their old
 track instead of counting as new arrivals — but only if they were standing/sitting still when lost.
 Someone who was moving when lost is assumed to have left, so a newcomer walking into the same spot or
@@ -20,17 +23,20 @@ through the same doorway is never mistaken for them.
 
 from __future__ import annotations
 
+import functools
 import logging
 import math
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Callable
 
 import numpy as np
 
 from .camera import BufferedFrame, CameraStream, Overlay, Recording
 from .config import AppConfig
+from .detector import LOW_CONFIDENCE
 from .faces import FaceDB, FaceEngine, FaceObs
 
 log = logging.getLogger(__name__)
@@ -50,12 +56,10 @@ class Track:
     box: np.ndarray
     first_seen: float
     last_seen: float
-    hits: int = 1
     confirmed: bool = False  # counts as a real person (stays true for the life of the track)
     votes: dict[str, list[float]] = field(default_factory=dict)
     unknown_faces: int = 0
     best_unknown: FaceObs | None = None
-    best_known: dict[str, FaceObs] = field(default_factory=dict)
     last_face_check: float = 0.0
     unknown_id: int | None = None
     seen_keys: set[str] = field(default_factory=set)  # identities already evaluated for this track
@@ -142,69 +146,123 @@ def assign_faces(faces: list[FaceObs], tracks: list[Track]) -> list[tuple[Track,
     return [(t, f) for _, t, f in best_for_track.values()]
 
 
+class _Detections:
+    """The part of ultralytics' Boxes interface that BYTETracker reads."""
+
+    def __init__(self, dets: np.ndarray):
+        self.dets = dets
+
+    def __len__(self) -> int:
+        return len(self.dets)
+
+    def __getitem__(self, mask) -> _Detections:
+        return _Detections(self.dets[mask])
+
+    @property
+    def conf(self) -> np.ndarray:
+        return self.dets[:, 4]
+
+    @property
+    def cls(self) -> np.ndarray:
+        return np.zeros(len(self.dets), np.float32)
+
+    @property
+    def xywh(self) -> np.ndarray:
+        x1, y1, x2, y2 = self.dets[:, :4].T
+        return np.stack([(x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1], axis=1)
+
+
+@functools.cache
+def _byte_tracker_class():
+    from ultralytics.trackers.byte_tracker import BYTETracker
+
+    class CameraByteTracker(BYTETracker):
+        @staticmethod
+        def reset_id() -> None:
+            """ByteTrack's id counter is global: resetting it for a new camera would reuse ids live on others."""
+
+    return CameraByteTracker
+
+
 class Tracker:
-    """Greedy IoU tracker; good enough at ~5 inference FPS for people walking.
+    """ByteTrack assigns detections to people; this class keeps camwatch's per-person state on top of it.
 
-    Tracks unseen for `ttl` seconds are dropped, but still ones are remembered for `memory` seconds and
-    revived if a person reappears in the same place (occlusion on a couch, detection flicker)."""
+    ByteTrack predicts each person's motion (Kalman filter) and makes a second matching pass with
+    low-confidence boxes, so someone walking fast, turning or partly hidden keeps one track instead of being
+    split into several "people". It holds a missed person for `ttl` seconds. Still people are remembered for
+    `memory` seconds beyond that and revived if someone reappears in the same place (occlusion on a couch,
+    leaning out of view)."""
 
-    def __init__(self, ttl: float, memory: float = 30.0):
-        self.ttl = ttl
-        self.memory = memory
+    def __init__(self, ttl: float, memory: float = 30.0, fps: float = 5.0, confidence: float = 0.5):
+        self.ttl, self.memory, self.fps = ttl, memory, fps
         self.tracks: dict[int, Track] = {}
         self.lost: dict[int, Track] = {}
+        args = SimpleNamespace(track_high_thresh=confidence, track_low_thresh=LOW_CONFIDENCE,
+                               new_track_thresh=confidence, track_buffer=self._buffer(), match_thresh=0.8,
+                               fuse_score=True)
+        self._bt = _byte_tracker_class()(args)
+        # ByteTrack reports a new person on their 2nd consecutive detection (filters one-frame false positives),
+        # except on its very first frame; starting the count at 1 removes that exception.
+        self._bt.frame_id = 1
+        self._by_bt: dict[int, Track] = {}  # ByteTrack id -> our track
+        self._last_update: float | None = None
         self._next = 1
 
+    def _buffer(self) -> int:
+        return max(1, round(self.ttl * self.fps))
+
+    def set_confidence(self, confidence: float) -> None:
+        self._bt.args.track_high_thresh = self._bt.args.new_track_thresh = confidence
+
     def update(self, dets: np.ndarray, now: float) -> list[Track]:
-        pairs = []
-        for tid, t in self.tracks.items():
-            for di, d in enumerate(dets):
-                iou = _iou(t.box, d[:4])
-                if iou < 0.2:  # fall back to centre distance for fast movers
-                    diag = np.hypot(t.box[2] - t.box[0], t.box[3] - t.box[1])
-                    dist = np.hypot((t.box[0] + t.box[2] - d[0] - d[2]) / 2, (t.box[1] + t.box[3] - d[1] - d[3]) / 2)
-                    iou = 0.1 if dist < 0.5 * diag else 0.0
-                if iou > 0:
-                    pairs.append((iou, tid, di))
-        pairs.sort(reverse=True)
-        used_t, used_d, seen = set(), set(), []
-        for _, tid, di in pairs:
-            if tid in used_t or di in used_d:
-                continue
-            used_t.add(tid)
-            used_d.add(di)
-            t = self.tracks[tid]
-            t.observe(dets[di][:4].copy(), now)
-            t.hits += 1
-            seen.append(t)
-        for di, d in enumerate(dets):
-            if di in used_d:
-                continue
-            t = self._revive(d[:4], now)
+        self._bt.max_frames_lost = self._buffer()  # live edits of ttl / detect_fps
+        out = self._bt.update(_Detections(dets))
+        seen = []
+        for row in out:
+            bt_id, box = int(row[4]), dets[int(row[7]), :4].copy()  # the detection, not the smoothed box
+            t = self._by_bt.get(bt_id)
+            if t is not None and t.id in self.lost:  # ByteTrack re-found someone we had set aside
+                self.tracks[t.id] = self.lost.pop(t.id)
             if t is None:
-                t = Track(id=self._next, box=d[:4].copy(), first_seen=now, last_seen=now)
+                t = self._revive(box, now)
+            if t is None:  # a new person; their first detection was in the previous update
+                t = Track(id=self._next, box=box, first_seen=now if self._last_update is None else self._last_update,
+                          last_seen=now)
                 self._next += 1
-            else:
-                t.hits += 1
-            t.observe(d[:4].copy(), now)
+            self._by_bt[bt_id] = t
+            t.observe(box, now)
             self.tracks[t.id] = t
             seen.append(t)
+        # ByteTrack waits for a second detection before reporting a new box, but a still person reappearing in
+        # their spot is known already: revive them on the first one, so a one-frame glimpse keeps them remembered.
+        for s in self._bt.tracked_stracks:
+            if not s.is_activated and s.start_frame == self._bt.frame_id and s.track_id not in self._by_bt:
+                box = dets[int(s.idx), :4].copy()
+                if t := self._revive(box, now):
+                    self._by_bt[s.track_id] = t
+                    t.observe(box, now)
+                    self.tracks[t.id] = t
+                    seen.append(t)
         for tid in [tid for tid, t in self.tracks.items() if now - t.last_seen > self.ttl]:
             t = self.tracks.pop(tid)
             if self.memory > 0 and t.was_still():
                 self.lost[tid] = t
         for tid in [tid for tid, t in self.lost.items() if now - t.last_seen > self.memory]:
             del self.lost[tid]
+        self._by_bt = {k: t for k, t in self._by_bt.items() if t.id in self.tracks or t.id in self.lost}
+        self._last_update = now
         return seen
 
     def _revive(self, box: np.ndarray, now: float) -> Track | None:
+        """A still person who went missing (set aside, or not yet expired) and reappears in the same place."""
+        missing = [t for t in self.tracks.values() if t.last_seen < now and t.was_still()]
         best, best_iou = None, REVIVE_IOU
-        for t in self.lost.values():
+        for t in [*self.lost.values(), *missing]:
             iou = _iou(t.box, box)
             if iou >= best_iou:
                 best, best_iou = t, iou
         if best is not None:
-            del self.lost[best.id]
+            self.lost.pop(best.id, None)
             log.debug("revived track %d (lost %.1fs, IoU %.2f)", best.id, now - best.last_seen, best_iou)
         return best
 
@@ -216,7 +274,7 @@ class PersonInfo:
     trusted: bool
     key: str
     unknown_id: int | None
-    face: FaceObs | None
+    face: FaceObs | None  # best unknown face (shown for labeling); None for named people
     new: bool = True  # arrived / newly identified in this event (vs. already present)
 
     @property
@@ -225,7 +283,7 @@ class PersonInfo:
             return f"{self.name} (trusted)" if self.trusted else self.name
         if self.unknown_id:
             return f"Unknown #{self.unknown_id}"
-        return "Unknown person" if self.face else "Unknown person (face not visible)"
+        return "Unknown person" if self.face else "Unknown person (no clear face)"
 
 
 @dataclass
@@ -265,7 +323,8 @@ class CameraMonitor:
         self.faces = faces
         self.db = db
         self.is_armed = is_armed
-        self.tracker = Tracker(cfg.events.track_ttl, cfg.events.lost_memory_seconds)
+        self.tracker = Tracker(cfg.events.track_ttl, cfg.events.lost_memory_seconds, cfg.detection.detect_fps,
+                               cfg.detection.confidence)
         self.event: _Event | None = None
         self.cooldowns: dict[str, float] = {}
         self.visible: list[str] = []
@@ -287,7 +346,9 @@ class CameraMonitor:
         det_cfg, face_cfg = self.cfg.detection, self.cfg.face
         if det_cfg.min_box_height > 0 and len(dets):
             dets = dets[(dets[:, 3] - dets[:, 1]) >= det_cfg.min_box_height * frame.shape[0]]
-        self.tracker.ttl, self.tracker.memory = self.cfg.events.track_ttl, self.cfg.events.lost_memory_seconds  # live edits
+        tr = self.tracker  # live edits
+        tr.ttl, tr.memory, tr.fps = self.cfg.events.track_ttl, self.cfg.events.lost_memory_seconds, det_cfg.detect_fps
+        tr.set_confidence(det_cfg.confidence)
         seen = self.tracker.update(dets, now)
         trusted_map = self.db.trusted_map()
         pending = self._confirm(seen, now)
@@ -306,14 +367,11 @@ class CameraMonitor:
                 if all(_iou(np.array(obs.box, float), np.array(c.box, float)) < 0.5 for c in candidates):
                     candidates.append(obs)
         for t, obs in assign_faces(candidates, people):
-            if t not in check:
+            if t not in check or not obs.good:  # small/blurry/turned faces mismatch people and spawn unknowns
                 continue
             m = self.db.match(obs.embedding)
             if m:
                 t.votes.setdefault(m.name, []).append(m.score)
-                best = t.best_known.get(m.name)
-                if best is None or obs.quality > best.quality:
-                    t.best_known[m.name] = obs
             else:
                 t.unknown_faces += 1
                 if t.best_unknown is None or obs.quality > t.best_unknown.quality:
@@ -324,7 +382,7 @@ class CameraMonitor:
         self.visible = [self._label(t, trusted_map) for t in confirmed]
 
         if self.event is None:
-            trigger = [t for t in confirmed if self._needs_event(t, trusted_map, now)]
+            trigger = [t for t in confirmed if self._needs_event(t, trusted_map)]
             if trigger:
                 anchor = max(min(t.first_seen for t in trigger), now - 1.0)
                 since = anchor - self.cfg.events.pre_seconds
@@ -338,15 +396,14 @@ class CameraMonitor:
     def _confirm(self, seen: list[Track], now: float) -> set[int]:
         """Decide which tracks count as real people. Returns ids of tracks held back as likely duplicates.
 
-        A new person standing apart confirms after `min_hits` detections, so quick visits still alert.
-        A box on top of someone already tracked is usually a split-second duplicate detection (YOLO boxing
+        A new person standing apart confirms as soon as ByteTrack reports them (2nd detection), so quick visits
+        still alert. A box on top of someone already tracked is usually a split-second duplicate detection (YOLO boxing
         the same person twice), so it must be seen in most frames for `overlap_confirm_seconds` first."""
-        det_cfg = self.cfg.detection
         established = [t for t in seen if t.confirmed]
         pending: set[int] = set()
-        # bigger / steadier boxes first, so when a person arrives with two boxes the real one wins
-        candidates = sorted((t for t in seen if not t.confirmed and t.hits >= det_cfg.min_hits),
-                            key=lambda t: (-t.hits, -(t.box[2] - t.box[0]) * (t.box[3] - t.box[1])))
+        # bigger boxes first, so when a person arrives with two boxes (whole body + torso) the real one wins
+        candidates = sorted((t for t in seen if not t.confirmed),
+                            key=lambda t: -(t.box[2] - t.box[0]) * (t.box[3] - t.box[1]))
         for t in candidates:
             if any(_containment(t.box, o.box) >= OVERLAP_CONTAINMENT for o in established) \
                     and not self._persisted(t, now):
@@ -363,7 +420,7 @@ class CameraMonitor:
         # seen in most frames of the window AND across all of it (a 3-frame flicker spans only ~0.4 s)
         frame = 1.0 / max(self.cfg.detection.detect_fps, 0.1)
         recent = [ts for ts, _, _ in t.path if ts >= now - hold - frame / 2]
-        needed = max(self.cfg.detection.min_hits, OVERLAP_PRESENCE * hold * self.cfg.detection.detect_fps)
+        needed = max(2, OVERLAP_PRESENCE * hold * self.cfg.detection.detect_fps)
         return len(recent) >= needed and now - recent[0] >= hold - frame
 
     def tick(self, now: float) -> EventResult | None:
@@ -378,7 +435,7 @@ class CameraMonitor:
         name, trusted = t.resolve(trusted_map, self.cfg.face.trusted_min_matches)
         return f"{name}{' ✓' if trusted else ''}" if name else "unknown"
 
-    def _needs_event(self, t: Track, trusted_map: dict[str, bool], now: float) -> bool:
+    def _needs_event(self, t: Track, trusted_map: dict[str, bool]) -> bool:
         """New people and identities not yet evaluated need an event; people who stay never re-trigger."""
         return t.key(trusted_map, self.cfg.face.trusted_min_matches) not in t.seen_keys
 
@@ -393,10 +450,10 @@ class CameraMonitor:
                 if t.unknown_id is None or not self.db.unknown_exists(t.unknown_id):
                     t.unknown_id = self.db.record_unknown(b.embedding, b.crop, b.quality, self.name, face_cfg.max_unknown_images)
             key = t.key(trusted_map, face_cfg.trusted_min_matches)
-            face = t.best_known.get(name) if name else t.best_unknown
             new = key not in t.seen_keys
             t.seen_keys.add(key)
-            people.append(PersonInfo(t.id, name, trusted, key, None if name else t.unknown_id, face, new))
+            people.append(PersonInfo(t.id, name, trusted, key, None if name else t.unknown_id,
+                                     None if name else t.best_unknown, new))
 
         # Only people who are new in this event can cause an alert; the others are listed as context.
         cooldown = self.cfg.events.cooldown_seconds

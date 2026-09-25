@@ -15,7 +15,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .engine import Engine
-from .timefmt import clock
+from .timefmt import ago, clock
 
 DECISION_STYLE = {"alert": "bold red", "trusted": "green", "cooldown": "yellow", "disarmed": "dim",
                   "unchanged": "dim"}
@@ -74,17 +74,6 @@ class KeyReader:
         return sys.stdin.read(1) if r else None
 
 
-def _age(ts: float) -> str:
-    s = int(time.time() - ts)
-    if s < 60:
-        return f"{s}s ago"
-    if s < 3600:
-        return f"{s // 60}m ago"
-    if s < 86400:
-        return f"{s // 3600}h ago"
-    return f"{s // 86400}d ago"
-
-
 def render(engine: Engine, logs: LogBuffer, height: int) -> Layout:
     up = int(time.time() - engine.started)
     armed = engine.armed and not engine.disarmed_cameras
@@ -114,7 +103,7 @@ def render(engine: Engine, logs: LogBuffer, height: int) -> Layout:
         last = Text("—", style="dim")
         if le:
             last = Text.assemble((f"{le.decision} ", DECISION_STYLE.get(le.decision, "")), f"{le.summary()} ",
-                                 (_age(le.wall_time), "dim"))
+                                 (ago(le.wall_time), "dim"))
         res = f"{r['resolution'][0]}x{r['resolution'][1]}" if r["resolution"][0] else "—"
         cams.add_row(r["name"], st_text, res, f"{r['fps']:.0f}", f"{r['infer_fps']:.1f}",
                      Text("on", style="green") if r["armed"] else Text("off", style="yellow"),

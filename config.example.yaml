@@ -7,18 +7,19 @@ rtsp_transport: tcp       # tcp is more reliable than udp over Wi-Fi
 detection:
   model: yolo11s.pt       # yolo11n.pt = faster, yolo11m.pt = more accurate; auto-downloaded to data/models
   device: auto            # auto | cuda:0 | cpu
-  confidence: 0.5
+  confidence: 0.5         # needed to start a new person; weaker boxes (down to 0.1) only keep tracking someone
   imgsz: 640
   detect_fps: 5.0         # inferences per second per camera
   half: false             # keep false on Maxwell GPUs (Quadro M4000): no fast FP16
-  min_hits: 2             # detections before a person is considered real (filters flickers)
   min_box_height: 0.0     # ignore people smaller than this fraction of frame height (e.g. 0.1)
   overlap_confirm_seconds: 1.0  # a box on top of someone already tracked must last this long to count
                                 # as another person (filters split-second duplicate boxes; 0 = off)
 
 face:
   detector_score: 0.85
-  min_face_px: 40         # faces smaller than this are not recognised
+  min_face_px: 64         # narrower faces are ignored (smaller ones rarely match even the right person)
+  quality_min_sharpness: 25.0  # blurrier faces are skipped: no vote, not saved as unknown, not enrolled
+  quality_max_turn: 0.45  # ...as are faces turned further than this (0 = straight on, 0.5 ≈ 45°)
   match_threshold: 0.40   # SFace cosine similarity; raise to 0.45 for fewer false matches
   trusted_min_matches: 2  # consistent matches needed before a trusted face suppresses an alert
   save_unknowns: true

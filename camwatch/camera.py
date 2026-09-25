@@ -78,7 +78,6 @@ class BufferedFrame:
 
 @dataclass
 class Recording:
-    since: float
     frames: list[BufferedFrame] = field(default_factory=list)
 
 
@@ -100,7 +99,6 @@ class CameraStream(threading.Thread):
         self.error = ""
         self.fps = 0.0
         self.resolution = (0, 0)
-        self.reconnects = 0
 
     # ---- public API -------------------------------------------------------
     def stop(self) -> None:
@@ -121,7 +119,7 @@ class CameraStream(threading.Thread):
         self._overlay = overlay
 
     def start_recording(self, since: float) -> Recording:
-        rec = Recording(since=since)
+        rec = Recording()
         with self._lock:
             rec.frames = [f for f in self._ring if f.ts >= since]
             self._recordings.append(rec)
@@ -148,7 +146,6 @@ class CameraStream(threading.Thread):
             if self._halt.is_set():
                 break
             self.status = "reconnecting"
-            self.reconnects += 1
             self._halt.wait(backoff)
             backoff = min(backoff * 2, 30.0)
         self.status = "stopped"

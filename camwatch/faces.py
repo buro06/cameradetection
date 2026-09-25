@@ -50,10 +50,14 @@ def ensure_models(models_dir: Path) -> dict[str, Path]:
 @dataclass
 class FaceObs:
     box: tuple[int, int, int, int]  # xyxy in frame coords
-    score: float
     quality: float
     embedding: np.ndarray  # (128,) L2-normalised
     crop: np.ndarray  # face with context, for humans to look at
+    issue: str = ""  # why the face is too poor to identify from ("" = good)
+
+    @property
+    def good(self) -> bool:
+        return not self.issue
 
 
 @dataclass
@@ -73,7 +77,7 @@ class FaceEngine:
         self._lock = threading.Lock()  # cv2.dnn nets are not thread-safe
 
     def analyze(self, frame: np.ndarray, region: tuple[float, float, float, float] | None = None,
-                max_faces: int = 1, min_score: float | None = None) -> list[FaceObs]:
+                max_faces: int = 1) -> list[FaceObs]:
         """Find faces in `frame` (optionally only inside region xyxy) and embed them, best first."""
         fh, fw = frame.shape[:2]
         if region is None:
@@ -90,7 +94,6 @@ class FaceEngine:
             return []
         s = min(1.0, YUNET_MAX_SIDE / max(ch, cw))
         small = crop if s >= 1.0 else cv2.resize(crop, (max(1, int(cw * s)), max(1, int(ch * s))))
-        min_score = self.cfg.detector_score if min_score is None else min_score
 
         with self._lock:
             self._det.setInputSize((small.shape[1], small.shape[0]))
@@ -99,7 +102,7 @@ class FaceEngine:
                 return []
             rows = rows.copy()
             rows[:, :14] /= s  # back to crop coordinates
-            rows = rows[rows[:, 14] >= min_score]
+            rows = rows[rows[:, 14] >= self.cfg.detector_score]
             rows = rows[rows[:, 2] >= self.cfg.min_face_px]
             rows = rows[np.argsort(-rows[:, 14] * rows[:, 2])][:max_faces]
             out = []
@@ -109,9 +112,36 @@ class FaceEngine:
                 emb /= np.linalg.norm(emb) + 1e-9
                 x, y, w, h = row[:4]
                 box = (int(x0 + x), int(y0 + y), int(x0 + x + w), int(y0 + y + h))
-                out.append(FaceObs(box=box, score=float(row[14]), quality=float(row[14]) * min(1.0, w / 112.0),
-                                   embedding=emb, crop=_context_crop(frame, box)))
+                sharp, turn = sharpness(chip), head_turn(row)
+                quality = float(row[14]) * min(1.0, w / 112.0) * min(1.0, sharp / 100.0)
+                out.append(FaceObs(box=box, quality=quality, embedding=emb,
+                                   crop=_context_crop(frame, box), issue=face_issue(self.cfg, sharp, turn)))
         return out
+
+
+def face_issue(cfg: FaceConfig, sharp: float, turn: float) -> str:
+    """Why a face is too poor to identify someone from, or "" if it is good enough (small faces are never
+    detected in the first place: `min_face_px`)."""
+    if sharp < cfg.quality_min_sharpness:
+        return "blurry"
+    if turn > cfg.quality_max_turn:
+        return "turned away"
+    return ""
+
+
+def sharpness(chip: np.ndarray) -> float:
+    """Variance of the Laplacian of the aligned 112x112 face: high for crisp detail, low for blur."""
+    return float(cv2.Laplacian(cv2.cvtColor(chip, cv2.COLOR_BGR2GRAY), cv2.CV_64F).var())
+
+
+def head_turn(row: np.ndarray) -> float:
+    """How far the nose sits off the centre line between the eyes, in eye distances (0 = facing the camera)."""
+    right_eye, left_eye, nose = row[4:6], row[6:8], row[8:10]
+    axis = left_eye - right_eye
+    dist = float(np.linalg.norm(axis))
+    if dist < 1:
+        return 1.0
+    return abs(float(np.dot(nose - (right_eye + left_eye) / 2, axis / dist))) / dist
 
 
 def _context_crop(frame: np.ndarray, box: tuple[int, int, int, int], pad: float = 0.5) -> np.ndarray:
