@@ -46,8 +46,7 @@ RECHECK_SECONDS = 2.0
 REVIVE_IOU = 0.5  # how closely a reappearing person must overlap where a lost track was
 STATIONARY_WINDOW = 2.0  # seconds of history used to decide whether a lost track was still
 STATIONARY_MOVE = 0.15  # max centre movement (fraction of box height) to count as still
-OVERLAP_CONTAINMENT = 0.6  # box this much inside someone already tracked = possible duplicate detection
-OVERLAP_PRESENCE = 0.6  # ...which must then be detected in this share of frames during the hold time
+OVERLAP_CONTAINMENT = 0.6  # a new box this much inside/around someone already tracked is the same person
 
 
 @dataclass
@@ -351,8 +350,8 @@ class CameraMonitor:
         tr.set_confidence(det_cfg.confidence)
         seen = self.tracker.update(dets, now)
         trusted_map = self.db.trusted_map()
-        pending = self._confirm(seen, now)
-        people = [t for t in seen if t.id not in pending]  # split-second duplicates can't claim faces
+        pending = self._confirm(seen)
+        people = [t for t in seen if t.id not in pending]  # duplicate boxes can't claim faces
 
         check = []
         for t in people:
@@ -393,35 +392,25 @@ class CameraMonitor:
             for t in confirmed:
                 self.event.tracks[t.id] = t
 
-    def _confirm(self, seen: list[Track], now: float) -> set[int]:
-        """Decide which tracks count as real people. Returns ids of tracks held back as likely duplicates.
+    def _confirm(self, seen: list[Track]) -> set[int]:
+        """Decide which tracks count as real people. Returns ids of tracks held back as duplicates.
 
         A new person standing apart confirms as soon as ByteTrack reports them (2nd detection), so quick visits
-        still alert. A box on top of someone already tracked is usually a split-second duplicate detection (YOLO boxing
-        the same person twice), so it must be seen in most frames for `overlap_confirm_seconds` first."""
+        still alert. A new box mostly on top of (or around) someone already tracked is YOLO boxing the same person
+        twice (torso + whole body, person + chair), so it never counts while it overlaps them; if the other person
+        leaves and it remains, it becomes a person then."""
         established = [t for t in seen if t.confirmed]
         pending: set[int] = set()
         # bigger boxes first, so when a person arrives with two boxes (whole body + torso) the real one wins
         candidates = sorted((t for t in seen if not t.confirmed),
                             key=lambda t: -(t.box[2] - t.box[0]) * (t.box[3] - t.box[1]))
         for t in candidates:
-            if any(_containment(t.box, o.box) >= OVERLAP_CONTAINMENT for o in established) \
-                    and not self._persisted(t, now):
+            if any(_containment(t.box, o.box) >= OVERLAP_CONTAINMENT for o in established):
                 pending.add(t.id)
                 continue
             t.confirmed = True
             established.append(t)
         return pending
-
-    def _persisted(self, t: Track, now: float) -> bool:
-        hold = self.cfg.detection.overlap_confirm_seconds
-        if hold <= 0:
-            return True
-        # seen in most frames of the window AND across all of it (a 3-frame flicker spans only ~0.4 s)
-        frame = 1.0 / max(self.cfg.detection.detect_fps, 0.1)
-        recent = [ts for ts, _, _ in t.path if ts >= now - hold - frame / 2]
-        needed = max(2, OVERLAP_PRESENCE * hold * self.cfg.detection.detect_fps)
-        return len(recent) >= needed and now - recent[0] >= hold - frame
 
     def tick(self, now: float) -> EventResult | None:
         """Finish the active event once its clip window has been recorded."""

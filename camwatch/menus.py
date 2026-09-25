@@ -642,7 +642,6 @@ SETTINGS = [
     ("detection", "confidence", "YOLO person confidence (0–1)"),
     ("detection", "detect_fps", "Inference rate per camera"),
     ("detection", "min_box_height", "Ignore people smaller than this fraction of frame height"),
-    ("detection", "overlap_confirm_seconds", "Box on top of a tracked person must last this long (s)"),
     ("face", "match_threshold", "Face match threshold (higher = stricter)"),
     ("face", "trusted_min_matches", "Face matches needed before a trusted person suppresses alerts"),
     ("face", "detector_score", "Face detector confidence"),

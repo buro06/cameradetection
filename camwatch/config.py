@@ -41,8 +41,6 @@ class DetectionConfig:
     detect_fps: float = 5.0  # inference rate per camera
     half: bool = False  # Maxwell GPUs (e.g. Quadro M4000) have no fast FP16
     min_box_height: float = 0.0  # ignore people smaller than this fraction of frame height
-    # a box on top of someone already tracked must persist this long to count (filters duplicate boxes)
-    overlap_confirm_seconds: float = 1.0
 
 
 @dataclass

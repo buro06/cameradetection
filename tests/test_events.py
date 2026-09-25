@@ -344,16 +344,30 @@ def test_duplicate_box_when_person_first_appears(cfg, db):
     assert [p.label for p in results[0].people] == ["Alice (trusted)"]
 
 
-def test_person_standing_behind_someone_still_counts(cfg, db):
-    alice = unit(10)
-    enroll(db, "Alice", alice, trusted=True)
+def test_bigger_box_around_a_known_person_never_becomes_a_second_person(cfg, db):
+    # Regression: "buro" plus an "Unknown person" box drawn around him (person + chair) for many seconds.
+    buro = unit(10)
+    enroll(db, "buro", buro, trusted=False)
     mon, faces = make_monitor(cfg, db)
-    faces.faces = [face(LEFT_FACE, alice)]
+    faces.faces = [face(LEFT_FACE, buro)]
     results, t = run(mon, [LEFT], 0.0, 10)
-    behind = [180, 90, 430, 690]  # a stranger mostly overlapping Alice, staying a few seconds
+    around = [60, 60, 520, 715]
+    results += run(mon, [LEFT, around], t, 30)[0]
+    assert [r.decision for r in results] == ["alert"]
+    assert [p.label for p in results[0].people] == ["buro"]
+    assert mon.visible == ["buro"]
+
+
+def test_overlapping_box_becomes_a_person_once_the_other_leaves(cfg, db):
+    mon, faces = make_monitor(cfg, db)
+    faces.faces = [face(LEFT_FACE, unit(99))]
+    results, t = run(mon, [LEFT], 0.0, 8)
+    behind = [180, 90, 430, 690]  # someone almost completely behind the first person
     results += run(mon, [LEFT, behind], t, 8)[0]
-    assert [r.decision for r in results] == ["trusted", "alert"]
-    assert sum(p.new for p in results[1].people) == 1
+    assert len(results) == 1
+    faces.faces = []
+    results += run(mon, [behind], t + 8, 8)[0]  # the first person walks off; the one behind is now visible
+    assert [r.decision for r in results] == ["alert", "alert"]
 
 
 def test_quick_visitor_apart_from_others_is_not_delayed(cfg, db):
