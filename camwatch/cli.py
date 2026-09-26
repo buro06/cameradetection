@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import logging
 import logging.handlers
 import platform
@@ -77,7 +78,17 @@ def cmd_run(args, console: Console) -> int:
         pass
     finally:
         log.info("Shutting down")
-        engine.stop()
+
+        def say(msg: str) -> None:
+            console.print(f"quit: {msg}", markup=False, highlight=False)
+
+        say("shutting down")
+        engine.stop(say)
+        others = [t for t in threading.enumerate() if t is not threading.main_thread()]
+        for t in others:
+            say(f"still running: {t.name} ({'daemon' if t.daemon else 'NOT daemon, Python waits for it'})")
+        atexit.register(say, "Python exit handlers running (if nothing follows, a library's exit code is stuck)")
+        say("leaving camwatch, Python is exiting …")
     return 0
 
 

@@ -10,6 +10,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Callable
 
 import cv2
 
@@ -50,6 +51,7 @@ class Engine:
         self.events: deque[EventLogEntry] = deque(maxlen=100)
         self._alerts: queue.Queue[EventResult] = queue.Queue(maxsize=20)
         self._halt = threading.Event()
+        self._workers: list[threading.Thread] = []
         self._cam_lock = threading.RLock()
         self.started = time.time()
 
@@ -68,20 +70,32 @@ class Engine:
         for cam in self.cfg.cameras:
             if cam.enabled:
                 self._start_camera(cam)
-        threading.Thread(target=self._detect_loop, name="detector", daemon=True).start()
-        threading.Thread(target=self._alert_loop, name="alerts", daemon=True).start()
-        threading.Thread(target=self._housekeeping_loop, name="housekeeping", daemon=True).start()
+        self._workers = [threading.Thread(target=self._detect_loop, name="detector", daemon=True),
+                         threading.Thread(target=self._alert_loop, name="alerts", daemon=True),
+                         threading.Thread(target=self._housekeeping_loop, name="housekeeping", daemon=True)]
+        for t in self._workers:
+            t.start()
         if self.bot:
             self.bot.start()
         log.info("camwatch started: %d camera(s), detector on %s", len(self.streams), self.detector.device)
 
-    def stop(self) -> None:
+    def stop(self, say: Callable[[str], None] = lambda msg: None, timeout: float = 5.0) -> None:
+        """Signal all threads to stop, then wait up to `timeout` for each camera and worker thread,
+        reporting every step through `say`."""
         self._halt.set()
         if self.bot:
+            say("stopping Telegram bot")
             self.bot.stop()
         with self._cam_lock:
-            for s in self.streams.values():
-                s.stop()
+            streams = list(self.streams.values())
+        for s in streams:
+            s.stop()
+        for t in [*streams, *self._workers]:
+            say(f"waiting for {t.name} …")
+            t0 = time.monotonic()
+            t.join(timeout)
+            state = "still running, giving up" if t.is_alive() else "stopped"
+            say(f"  {t.name}: {state} ({time.monotonic() - t0:.1f}s)")
 
     # ---- cameras ---------------------------------------------------------------
     def _start_camera(self, cam: CameraConfig) -> None:
