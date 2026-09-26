@@ -11,9 +11,9 @@
 
 ## How alerts are decided
 
-1. YOLO detects people and **ByteTrack** follows each one from frame to frame. ByteTrack predicts where each person is moving and also uses weaker detections (turning away, motion blur, partly hidden) to keep following someone already tracked, so one person isn't split into several "people". Only a detection above `detection.confidence` can start a new person, and it must be seen on **2 inferences**, which filters out one-frame false positives. A new box that sits mostly on top of (or around) someone already tracked never counts as another person while it overlaps them. YOLO sometimes boxes the same person twice (torso and whole body, or a person together with their chair), and this stops that from turning into a phantom "Unknown person". The trade-off: a second person standing directly behind someone, almost completely hidden, isn't counted until they step out from behind.
+1. YOLO sees a person on **2 inferences**, which filters out one-frame false positives. A box that appears *on top of* someone already tracked must last about **1 second** (`detection.overlap_confirm_seconds`) before it counts as another person. YOLO sometimes boxes the same person twice for a split second, and this stops that from turning into a phantom "Unknown person".
 2. Recording starts at the moment the person was **first detected**. A per-camera ring buffer supplies the frames from before the confirmation. Set `events.pre_seconds` to also include time before detection.
-3. For the next **5s**, detection and face recognition keep running. Each face observation votes on the identity of its tracked person. **Poor faces are skipped**: faces that are too small (`face.min_face_px`, 64), blurry (`face.quality_min_sharpness`) or turned away (`face.quality_max_turn`) don't vote, aren't saved as unknown faces and can't be enrolled. Such faces often match the wrong person or create a new "unknown" every time.
+3. For the next **5s**, detection and face recognition keep running. Each face observation votes on the identity of its tracked person.
 4. When the clip ends, only the people who are **new** in this clip are considered. Everyone already present is listed in the caption for context but can't cause an alert.
    - If all the new people are trusted (confirmed by at least `trusted_min_matches` consistent face matches), **no alert** is sent.
    - Otherwise an alert is sent. The exception is a known person or known unknown face that **left and came back** within `events.cooldown_seconds` (default 60s) on that camera.
@@ -25,7 +25,7 @@
 - **People who leave:** someone who was *moving* when they disappeared is treated as gone. A newcomer stepping into that spot or through the same doorway is always treated as new.
 - **Trusted people who look away:** once confirmed, a trusted person stays trusted while they're tracked, even when their face is turned away. The exception is when a *different* known person's face starts to outvote them.
 
-If a household member walks in with their face turned away, you get one "Unknown person (no clear face)" alert. Nothing further comes once they sit down.
+If a household member walks in with their face turned away, you get one "Unknown person (face not visible)" alert. Nothing further comes once they sit down.
 
 Several safety rules keep a trusted face from silencing an alert for someone else:
 - A face only counts for the person whose head position it matches.
@@ -62,7 +62,7 @@ camwatch            # start monitoring with the live dashboard
 3. Send `/start` to your bot, or add it to a group.
 4. Choose **Find chats & users**.
 
-Alerts go to `chat_ids`. `allowed_user_ids` is the command whitelist. When it's set, only those users can use commands and the face-labelling buttons, in any chat, alert groups included, so other group members still get alerts but can't control the bot. When it's empty, anyone in an alert chat can. Everything else is ignored and logged. To keep the token out of `config.yaml`, set it in the `CAMWATCH_TELEGRAM_TOKEN` environment variable instead.
+Alerts go to `chat_ids`. Commands are accepted only from those chats or from `allowed_user_ids`; everything else is ignored and logged. To keep the token out of `config.yaml`, set it in the `CAMWATCH_TELEGRAM_TOKEN` environment variable instead.
 
 ### Dashboard keys
 
@@ -99,15 +99,6 @@ Commands queued while camwatch was offline (older than 5 minutes) are ignored.
 
 ## Running 24/7 on Windows
 
-**Simplest: the watcher script.** Double-click `run-camwatch.cmd` in the camwatch folder, or run it from a cmd window. It activates `.venv`, starts camwatch, and restarts it in the same window whenever it exits, whether it crashed or you pressed `q`:
-
-```bat
-run-camwatch                  :: live dashboard
-run-camwatch run --headless   :: no dashboard
-```
-
-After camwatch exits, the watcher waits 10 s before restarting. Press `R` to restart now or `Q` to stop. If camwatch keeps failing within a minute of starting, the wait grows up to 5 minutes. Restarts are logged to `data\logs\watcher.log`. To start the watcher at log on, put a shortcut to it in `shell:startup`.
-
 **Option A: NSSM service** (starts at boot, restarts on crash):
 
 ```powershell
@@ -133,11 +124,11 @@ Logs are written to `data/logs/camwatch.log` (rotated), every event to `data/eve
 | Symptom | Setting |
 |---|---|
 | USB webcam stuck at 640×360 / 640×480 on Windows | Menu → Cameras → *camera* → **Resolution** (e.g. 1920x1080). If it still doesn't change, try **Pixel format / capture backend** → MJPG, or backend msmf. The Cameras table shows `640x360 (asked 1920x1080)` when the camera ignores the request |
-| USB webcam stuck at ~5 fps at 1080p | Menu → Cameras → *camera* → **Frame rate** → 30 fps (or `fps: 30` under the camera in `config.yaml`). The log line `USB camera opened: 1920x1080 MJPG @ 30 fps` shows what the camera accepted. A warning after 5 s means frames still arrive slowly. If the format shown is YUY2, set **Pixel format** → MJPG or try backend msmf; if it's MJPG, the room is probably too dim |
 | Alerts for people on the street far away | `detection.min_box_height: 0.15` |
 | Wrong name assigned | Raise `face.match_threshold` (0.45–0.5) and enroll more varied samples |
 | Known person shown as unknown | Enroll more samples (different light and angles), or lower `match_threshold` slightly (not below 0.36) |
 | Trusted person still triggers alerts | Their face isn't seen clearly during the 5s window. Lower `face.min_face_px`, raise `events.post_seconds`, or mount the camera at face height |
+| Duplicate boxes on one person / phantom "Unknown person (face not visible)" alerts | Raise `detection.overlap_confirm_seconds` (e.g. 2) |
 | Same person alerts again after briefly stepping out | Raise `events.cooldown_seconds` (only applies to recognised faces / unknown-face clusters) |
 | Someone who stays still gets "new" alerts after being hidden a long time | Raise `events.lost_memory_seconds` |
 | GPU overloaded | `detection.model: yolo11n.pt`, or lower `detection.detect_fps` |

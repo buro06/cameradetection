@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import os
 import threading
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
@@ -11,7 +10,6 @@ from typing import Any
 
 import yaml
 
-log = logging.getLogger(__name__)
 DEFAULT_CONFIG_PATH = Path(os.environ.get("CAMWATCH_CONFIG", "config.yaml"))
 
 
@@ -26,7 +24,6 @@ class CameraConfig:
     backend: str = "auto"
     width: int = 0  # requested capture size for USB cameras (0 = driver default)
     height: int = 0
-    fps: float = 0.0  # requested frame rate for USB cameras (0 = driver default)
     # USB pixel format: auto (MJPG on Windows) | MJPG | YUY2 | none
     fourcc: str = "auto"
     snapshot_fps: float = 2.0
@@ -40,17 +37,16 @@ class DetectionConfig:
     imgsz: int = 640
     detect_fps: float = 5.0  # inference rate per camera
     half: bool = False  # Maxwell GPUs (e.g. Quadro M4000) have no fast FP16
+    min_hits: int = 2  # detections needed before a track counts as a real person
     min_box_height: float = 0.0  # ignore people smaller than this fraction of frame height
+    # a box on top of someone already tracked must persist this long to count (filters duplicate boxes)
+    overlap_confirm_seconds: float = 1.0
 
 
 @dataclass
 class FaceConfig:
     detector_score: float = 0.85
-    # Measured on SFace: faces under ~60 px wide or very blurry rarely match even the right person.
-    min_face_px: int = 64  # narrower faces are ignored
-    # Blurry or turned-away faces are skipped too: they don't vote on who someone is, and aren't saved or enrolled.
-    quality_min_sharpness: float = 25.0  # detail left in the aligned face (Laplacian variance); lower = blurrier
-    quality_max_turn: float = 0.45  # how far the face is turned from the camera (0 = straight on, ~0.5 = 45°)
+    min_face_px: int = 40
     match_threshold: float = 0.40  # SFace cosine similarity (OpenCV suggests 0.363)
     trusted_min_matches: int = 2  # face matches needed before a trusted person suppresses alerts
     save_unknowns: bool = True
@@ -80,8 +76,7 @@ class TelegramConfig:
     enabled: bool = False
     bot_token: str = ""
     chat_ids: list[int] = field(default_factory=list)  # chats that receive alerts
-    # command whitelist, applies in alert groups too (empty = anyone in an alert chat may send commands)
-    allowed_user_ids: list[int] = field(default_factory=list)
+    allowed_user_ids: list[int] = field(default_factory=list)  # users allowed to send commands
     send_unknown_faces: bool = True
 
 
@@ -141,9 +136,9 @@ def _build(cls, data: dict | None):
     data = data or {}
     known = {f.name for f in fields(cls)}
     unknown = set(data) - known
-    if unknown:  # typo, or a setting removed in a newer version: ignored, and dropped on the next save
-        log.warning("Ignoring unknown %s keys in config: %s", cls.__name__, ", ".join(sorted(unknown)))
-    return cls(**{k: v for k, v in data.items() if k in known})
+    if unknown:
+        raise ValueError(f"Unknown {cls.__name__} keys: {', '.join(sorted(unknown))}")
+    return cls(**data)
 
 
 def load_config(path: Path | str = DEFAULT_CONFIG_PATH) -> AppConfig:

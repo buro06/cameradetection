@@ -10,8 +10,8 @@ def unit(seed: int) -> np.ndarray:
     return v / np.linalg.norm(v)
 
 
-def face(box, emb, quality=0.95) -> FaceObs:
-    return FaceObs(box=box, quality=quality, embedding=emb, crop=np.zeros((160, 160, 3), np.uint8))
+def face(box, emb, score=0.95) -> FaceObs:
+    return FaceObs(box=box, score=score, quality=score, embedding=emb, crop=np.zeros((160, 160, 3), np.uint8))
 
 
 class FakeStream:
@@ -24,7 +24,7 @@ class FakeStream:
 
     def start_recording(self, since):
         from camwatch.camera import Recording
-        return Recording()
+        return Recording(since=since)
 
     def stop_recording(self, rec):
         pass
@@ -36,7 +36,7 @@ class FakeFaces:
     def __init__(self):
         self.faces: list[FaceObs] = []
 
-    def analyze(self, frame, region=None, max_faces=1):
+    def analyze(self, frame, region=None, max_faces=1, min_score=None):
         out = []
         for f in self.faces:
             cx, cy = (f.box[0] + f.box[2]) / 2, (f.box[1] + f.box[3]) / 2

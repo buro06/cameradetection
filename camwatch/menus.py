@@ -21,7 +21,6 @@ from rich.table import Table
 from .camera import CameraStream, describe_source
 from .config import AppConfig, CameraConfig
 from .engine import Engine
-from .timefmt import ago
 
 log = logging.getLogger(__name__)
 BACK = "↩  Back"
@@ -196,7 +195,6 @@ def cameras_menu(engine: Engine, console: Console) -> None:
 
 
 RESOLUTIONS = [(640, 480), (1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)]
-FRAME_RATES = [15, 24, 25, 30, 60]
 
 
 def is_usb(cam: CameraConfig) -> bool:
@@ -230,27 +228,6 @@ def pick_resolution(cam: CameraConfig, mark_current: bool = True) -> bool | None
         pick = tuple(int(v) for v in re.split(r"[xX]", raw.replace(" ", "")))
     changed = (cam.width, cam.height) != pick
     cam.width, cam.height = pick
-    return changed
-
-
-def pick_fps(cam: CameraConfig) -> bool | None:
-    """Ask for a USB capture frame rate. None = cancelled, else whether it changed."""
-    mark = lambda f: "  ← current" if f == cam.fps else ""  # noqa: E731
-    choices = [questionary.Choice(f"Camera default{mark(0)}", 0.0)]
-    choices += [questionary.Choice(f"{f} fps{mark(f)}", float(f)) for f in FRAME_RATES]
-    choices.append(questionary.Choice("Custom…", "custom"))
-    default = cam.fps if cam.fps == 0 or cam.fps in FRAME_RATES else "custom"
-    pick = _select("Capture frame rate (USB cameras only):", choices, default=default)
-    if pick is None:
-        return None
-    if pick == "custom":
-        raw = _text("Frames per second:", default=f"{cam.fps or 30:g}",
-                    validate=lambda s: bool(re.fullmatch(r"\s*\d{1,3}(\.\d+)?\s*", s)) and 0 < float(s) <= 240 or "1–240")
-        if not raw:
-            return None
-        pick = float(raw)
-    changed = cam.fps != pick
-    cam.fps = pick
     return changed
 
 
@@ -340,7 +317,7 @@ def scan_usb(cfg: AppConfig, console: Console) -> CameraConfig | None:
 
 def camera_actions(engine: Engine, console: Console, cam: CameraConfig) -> None:
     cfg = engine.cfg
-    usb_actions = ["📐  Resolution", "🎞   Frame rate", "🎛   Pixel format / capture backend"] if is_usb(cam) else []
+    usb_actions = ["📐  Resolution", "🎛   Pixel format / capture backend"] if is_usb(cam) else []
     action = _select(f"{cam.name}:", ["📸  Snapshot", "✏️   Edit source", *usb_actions,
                                       "⏯   Disable" if cam.enabled else "⏯   Enable", "🗑   Remove", BACK])
     if action is None or action == BACK:
@@ -349,9 +326,8 @@ def camera_actions(engine: Engine, console: Console, cam: CameraConfig) -> None:
         if not save_snapshots(engine, cameras=[cam.name]):
             console.print("[yellow]No frame available.[/]")
             _pause()
-    elif "Resolution" in action or "Frame rate" in action or "Pixel format" in action:
-        picker = pick_resolution if "Resolution" in action else pick_fps if "Frame rate" in action else pick_usb_format
-        changed = picker(cam)
+    elif "Resolution" in action or "Pixel format" in action:
+        changed = pick_resolution(cam) if "Resolution" in action else pick_usb_format(cam)
         if changed:
             cfg.save()
             engine.apply_camera(cam)
@@ -458,8 +434,6 @@ def enroll_flow(engine: Engine, console: Console, name: str | None = None, sampl
                 faces = engine.faces.analyze(frame, None, max_faces=2)
                 if len(faces) > 1:
                     status = "[yellow]more than one face in view[/]"
-                elif faces and not faces[0].good:
-                    status = f"[yellow]face {faces[0].issue} — come closer / face the camera / hold still[/]"
                 elif faces:
                     obs = faces[0]
                     other = db.match(obs.embedding)
@@ -502,6 +476,11 @@ def enroll_flow(engine: Engine, console: Console, name: str | None = None, sampl
 
 
 # ---- unknown faces ------------------------------------------------------------------------
+def _ago(ts: float) -> str:
+    s = int(time.time() - ts)
+    return f"{s // 60}m ago" if s < 3600 else (f"{s // 3600}h ago" if s < 86400 else f"{s // 86400}d ago")
+
+
 def unknowns_menu(engine: Engine, console: Console) -> None:
     db = engine.db
     while True:
@@ -512,7 +491,7 @@ def unknowns_menu(engine: Engine, console: Console) -> None:
             _pause()
             return
         choice = _select(f"{len(unknowns)} unknown face cluster(s) — pick one to review:", [
-            *(questionary.Choice(f"#{u['id']:<5} seen {u['sightings']}× · {u['camera']} · {ago(u['last_seen'])}", u)
+            *(questionary.Choice(f"#{u['id']:<5} seen {u['sightings']}× · {u['camera']} · {_ago(u['last_seen'])}", u)
               for u in unknowns[:40]),
             "🗑  Delete ALL unknown faces", BACK])
         if choice is None or choice == BACK:
@@ -641,13 +620,13 @@ def telegram_menu(cfg: AppConfig, console: Console, engine: Engine | None = None
 SETTINGS = [
     ("detection", "confidence", "YOLO person confidence (0–1)"),
     ("detection", "detect_fps", "Inference rate per camera"),
+    ("detection", "min_hits", "Detections before a person counts"),
     ("detection", "min_box_height", "Ignore people smaller than this fraction of frame height"),
+    ("detection", "overlap_confirm_seconds", "Box on top of a tracked person must last this long (s)"),
     ("face", "match_threshold", "Face match threshold (higher = stricter)"),
     ("face", "trusted_min_matches", "Face matches needed before a trusted person suppresses alerts"),
     ("face", "detector_score", "Face detector confidence"),
-    ("face", "min_face_px", "Faces narrower than this (px) are ignored"),
-    ("face", "quality_min_sharpness", "Blurrier faces than this aren't used (lower = allow more blur)"),
-    ("face", "quality_max_turn", "Faces turned further than this aren't used (0 = straight on, 0.5 ≈ 45°)"),
+    ("face", "min_face_px", "Minimum face size in pixels"),
     ("face", "save_unknowns", "Save unknown faces for labeling"),
     ("events", "cooldown_seconds", "No re-alert if the same person leaves and returns within (s)"),
     ("events", "lost_memory_seconds", "Still person hidden up to this long isn't a new arrival (s)"),

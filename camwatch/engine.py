@@ -267,12 +267,12 @@ class Engine:
             s, m = self.streams.get(cam.name), self.monitors.get(cam.name)
             last = m.last_result if m else None
             rows.append({
-                "name": cam.name,
+                "name": cam.name, "source": describe_source(cam.source), "enabled": cam.enabled,
                 "status": (s.status if s.is_live() or s.status != "live" else "stale") if s else "disabled",
                 "error": s.error if s else "", "fps": s.fps if s else 0.0, "infer_fps": m.infer_fps if m else 0.0,
                 "resolution": s.resolution if s else (0, 0), "armed": self.is_armed(cam.name),
                 "visible": list(m.visible) if m else [], "recording": bool(m and m.event),
-                "last_event": last,
+                "last_event": last, "reconnects": s.reconnects if s else 0,
             })
         return rows
 

@@ -104,7 +104,7 @@ def disk_report(cfg: AppConfig, esc=lambda s: s) -> str:
     m = measure(cfg)
     total, disk = m["total"], m["disk"]
     free_frac = disk.free / disk.total if disk.total else 0.0
-    lines = ["💾 <b>Disk usage</b>",
+    lines = [f"💾 <b>Disk usage</b>",
              f"camwatch folder: <b>{human(total.bytes)}</b> ({total.files:,} files)",
              f"<code>{esc(str(m['base']))}</code>"]
     for label, u in m["parts"]:

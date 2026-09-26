@@ -19,7 +19,6 @@ dependencies = [
     "rich>=13",
     "questionary>=2",
     "imageio-ffmpeg",
-    "lap>=0.5.12",  # linear assignment for ByteTrack (Ultralytics tracker)
 ]
 
 [project.optional-dependencies]

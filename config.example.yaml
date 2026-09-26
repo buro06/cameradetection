@@ -7,17 +7,18 @@ rtsp_transport: tcp       # tcp is more reliable than udp over Wi-Fi
 detection:
   model: yolo11s.pt       # yolo11n.pt = faster, yolo11m.pt = more accurate; auto-downloaded to data/models
   device: auto            # auto | cuda:0 | cpu
-  confidence: 0.5         # needed to start a new person; weaker boxes (down to 0.1) only keep tracking someone
+  confidence: 0.5
   imgsz: 640
   detect_fps: 5.0         # inferences per second per camera
   half: false             # keep false on Maxwell GPUs (Quadro M4000): no fast FP16
+  min_hits: 2             # detections before a person is considered real (filters flickers)
   min_box_height: 0.0     # ignore people smaller than this fraction of frame height (e.g. 0.1)
+  overlap_confirm_seconds: 1.0  # a box on top of someone already tracked must last this long to count
+                                # as another person (filters split-second duplicate boxes; 0 = off)
 
 face:
   detector_score: 0.85
-  min_face_px: 64         # narrower faces are ignored (smaller ones rarely match even the right person)
-  quality_min_sharpness: 25.0  # blurrier faces are skipped: no vote, not saved as unknown, not enrolled
-  quality_max_turn: 0.45  # ...as are faces turned further than this (0 = straight on, 0.5 ≈ 45°)
+  min_face_px: 40         # faces smaller than this are not recognised
   match_threshold: 0.40   # SFace cosine similarity; raise to 0.45 for fewer false matches
   trusted_min_matches: 2  # consistent matches needed before a trusted face suppresses an alert
   save_unknowns: true
@@ -41,8 +42,7 @@ telegram:
   enabled: true
   bot_token: ""           # or set env var CAMWATCH_TELEGRAM_TOKEN (preferred)
   chat_ids: []            # chats that receive alerts (use `camwatch setup` to discover)
-  allowed_user_ids: []    # command whitelist: only these users may use commands and face buttons, in any
-                          # chat including alert groups (empty = anyone in an alert chat may)
+  allowed_user_ids: []    # users allowed to send commands from any chat
   send_unknown_faces: true
 
 cameras:
@@ -53,7 +53,6 @@ cameras:
     backend: auto         # Windows: dshow (default) or msmf
     width: 1920           # requested capture size (USB only; 0 = driver default)
     height: 1080
-    fps: 30               # requested frame rate (USB only; 0 = driver default)
     fourcc: auto          # auto (= MJPG on Windows) | MJPG | YUY2 | none
   - name: garage
     source: "http://192.168.1.30/snapshot.jpg"   # JPEG snapshot URL (polled)

@@ -11,7 +11,6 @@ from .config import DetectionConfig
 
 log = logging.getLogger(__name__)
 PERSON_CLASS = 0
-LOW_CONFIDENCE = 0.1  # weaker boxes are still returned: the tracker uses them to keep following known people
 
 
 def cuda_check() -> tuple[bool, str]:
@@ -67,11 +66,10 @@ class PersonDetector:
         self.detect([np.zeros((cfg.imgsz, cfg.imgsz, 3), np.uint8)])  # warm-up
 
     def detect(self, frames: list[np.ndarray]) -> list[np.ndarray]:
-        """Returns per frame an (N, 5) array: x1, y1, x2, y2, confidence. Includes boxes down to LOW_CONFIDENCE;
-        only those above `confidence` can start a new person."""
+        """Returns per frame an (N, 5) array: x1, y1, x2, y2, confidence."""
         extra = {"half": True} if self.half else {}  # `half` is deprecated in newer ultralytics; only pass when used
         results = self.model.predict(
-            frames, classes=[PERSON_CLASS], conf=min(self.cfg.confidence, LOW_CONFIDENCE), imgsz=self.cfg.imgsz,
+            frames, classes=[PERSON_CLASS], conf=self.cfg.confidence, imgsz=self.cfg.imgsz,
             device=self.device, verbose=False, **extra,
         )
         out = []

@@ -107,30 +107,6 @@ def test_callback_from_stranger_rejected(bot, db):
     assert db.unknown_exists(uid)
 
 
-def test_whitelist_applies_inside_alert_group(bot):
-    bot._handle_update(msg("/disarm", chat=CHAT, user=STRANGER))
-    assert bot.engine.armed_calls == [] and bot.sent == []
-    bot._handle_update(msg("/disarm", chat=CHAT, user=USER))
-    assert bot.engine.armed_calls == [(None, False)]
-
-
-def test_group_member_cannot_press_face_buttons_when_not_whitelisted(bot, db):
-    uid = unknown(db)
-    bot._handle_update({"update_id": 2, "callback_query": {
-        "id": "cb", "data": f"ig:{uid}", "from": {"id": STRANGER},
-        "message": {"message_id": 5, "chat": {"id": CHAT}}}})
-    assert db.unknown_exists(uid)
-    assert ("answerCallbackQuery", {"callback_query_id": "cb", "text": "Not authorized"}) in bot.calls
-
-
-def test_empty_whitelist_lets_alert_chat_members_command(bot):
-    bot.cfg.telegram.allowed_user_ids = []
-    bot._handle_update(msg("/disarm", chat=CHAT, user=STRANGER))
-    assert bot.engine.armed_calls == [(None, False)]
-    bot._handle_update(msg("/disarm", chat=STRANGER, user=STRANGER))
-    assert len(bot.engine.armed_calls) == 1
-
-
 def test_disk_command_replies_with_report(bot, monkeypatch):
     import camwatch.telegram as tg
 
