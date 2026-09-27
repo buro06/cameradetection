@@ -124,6 +124,20 @@ def test_single_trusted_match_is_not_enough(cfg, db):
     assert results[0].people[0].label == "Alice"  # named, but not confirmed as trusted
 
 
+def test_clip_and_alert_labels_show_match_percent(cfg, db):
+    alice = unit(10)
+    enroll(db, "Alice", alice, trusted=False)
+    mon, faces = make_monitor(cfg, db)
+    seen = alice + 0.75 * unit(11)  # same person, imperfect match
+    seen /= np.linalg.norm(seen)
+    faces.faces = [face(LEFT_FACE, seen)]
+    results, _ = run(mon, [LEFT], 0.0, 6)
+    person = results[0].people[0]
+    pct = f"{float(seen @ alice):.0%}"
+    assert person.label == "Alice"  # logs and dashboard stay unchanged
+    assert person.scored_label == f"Alice {pct}" and results[0].labels[person.track_id] == f"Alice {pct}"
+
+
 def test_mostly_unknown_faces_outvote_a_trusted_match(cfg, db):
     alice = unit(10)
     enroll(db, "Alice", alice, trusted=True)

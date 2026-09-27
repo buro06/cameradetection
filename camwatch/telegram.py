@@ -141,7 +141,7 @@ class TelegramBot:
         lines = [f"🚨 <b>{_esc(result.camera)}</b> — {clock(when)} ({when:%a %d %b})"]
         for p in result.people:
             icon = "🟢" if p.trusted else ("🟠" if p.name else "🔴")
-            lines.append(f"{icon} {_esc(p.label)}")
+            lines.append(f"{icon} {_esc(p.scored_label)}")
         unknowns = [p for p in result.people if p.unknown_id and p.face is not None]
         if unknowns and self.cfg.telegram.send_unknown_faces:
             lines.append("<i>Reply to a face below with /name &lt;Name&gt; or /trust &lt;Name&gt;</i>")

@@ -218,6 +218,7 @@ class PersonInfo:
     unknown_id: int | None
     face: FaceObs | None
     new: bool = True  # arrived / newly identified in this event (vs. already present)
+    score: float | None = None  # mean face-match similarity for `name` on this track
 
     @property
     def label(self) -> str:
@@ -226,6 +227,11 @@ class PersonInfo:
         if self.unknown_id:
             return f"Unknown #{self.unknown_id}"
         return "Unknown person" if self.face else "Unknown person (face not visible)"
+
+    @property
+    def scored_label(self) -> str:
+        """Label with the match score as a percent, for clips and alerts."""
+        return f"{self.label} {self.score:.0%}" if self.name and self.score is not None else self.label
 
 
 @dataclass
@@ -241,7 +247,7 @@ class EventResult:
 
     @property
     def labels(self) -> dict[int, str]:
-        return {p.track_id: p.label for p in self.people}
+        return {p.track_id: p.scored_label for p in self.people}
 
     def summary(self) -> str:
         return ", ".join(p.label for p in self.people) or "nobody"
@@ -396,7 +402,8 @@ class CameraMonitor:
             face = t.best_known.get(name) if name else t.best_unknown
             new = key not in t.seen_keys
             t.seen_keys.add(key)
-            people.append(PersonInfo(t.id, name, trusted, key, None if name else t.unknown_id, face, new))
+            score = float(np.mean(t.votes[name])) if name in t.votes else None
+            people.append(PersonInfo(t.id, name, trusted, key, None if name else t.unknown_id, face, new, score))
 
         # Only people who are new in this event can cause an alert; the others are listed as context.
         cooldown = self.cfg.events.cooldown_seconds
