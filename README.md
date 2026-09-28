@@ -80,6 +80,7 @@ Monitoring keeps running while menus are open.
 - **Live capture:** Menu → People & faces → *Enroll a person from a live camera*. The person stands alone about 1–2 m from the camera and slowly turns their head. About 12 varied samples are captured, with an optional preview window.
 - **From alerts (Telegram):** each unknown face arrives as a photo with buttons for your known people. Either tap a name, or reply to the photo with `/name Alice` or `/trust Alice`.
 - **Review in CLI:** Menu → *Review unknown faces*. Similar unknown faces are grouped into clusters, and each cluster opens in your image viewer so you can name it, trust it, or delete it.
+- **Photo folders:** each person's photos live in `data/faces/<id>/` (the id is shown under People & faces). To fix a mix-up or add photos by hand, move/copy/delete photos there, then run Menu → Settings → *Rebuild face database from the photos in the faces folder*. Recognition uses the database, not the photos, so changes only take effect after a rebuild. It shows a before/after preview and changes nothing until you confirm.
 
 ### Telegram commands
 
@@ -135,7 +136,7 @@ Logs are written to `data/logs/camwatch.log` (rotated), every event to `data/eve
 | USB webcam stuck at 640×360 / 640×480 on Windows | Menu → Cameras → *camera* → **Resolution** (e.g. 1920x1080). If it still doesn't change, try **Pixel format / capture backend** → MJPG, or backend msmf. The Cameras table shows `640x360 (asked 1920x1080)` when the camera ignores the request |
 | USB webcam stuck at ~5 fps at 1080p | Menu → Cameras → *camera* → **Frame rate** → 30 fps (or `fps: 30` under the camera in `config.yaml`). The log line `USB camera opened: 1920x1080 MJPG @ 30 fps` shows what the camera accepted. A warning after 5 s means frames still arrive slowly. If the format shown is YUY2, set **Pixel format** → MJPG or try backend msmf; if it's MJPG, the room is probably too dim |
 | Alerts for people on the street far away | `detection.min_box_height: 0.15` |
-| Wrong name assigned | Raise `face.match_threshold` (0.45–0.5) and enroll more varied samples |
+| Wrong name assigned | Move the wrong photos to the right person's folder (or delete them), then Settings → *Rebuild face database*. Raise `face.match_threshold` (0.45–0.5) and enroll more varied samples |
 | Known person shown as unknown | Enroll more samples (different light and angles), or lower `match_threshold` slightly (not below 0.36) |
 | Trusted person still triggers alerts | Their face isn't seen clearly during the 5s window. Lower `face.min_face_px`, raise `events.post_seconds`, or mount the camera at face height |
 | Duplicate boxes on one person / phantom "Unknown person (face not visible)" alerts | Raise `detection.overlap_confirm_seconds` (e.g. 2) |

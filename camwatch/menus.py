@@ -19,8 +19,9 @@ from rich.console import Console
 from rich.table import Table
 
 from .camera import CameraStream, describe_source
-from .config import AppConfig, CameraConfig
+from .config import AppConfig, CameraConfig, field_default, yaml_scalar
 from .engine import Engine
+from .faces import MAX_EMBEDDINGS_PER_PERSON, image_files, read_image
 
 log = logging.getLogger(__name__)
 BACK = "↩  Back"
@@ -69,7 +70,7 @@ def montage(images: list[np.ndarray], tile_h: int = 200, cols: int = 5) -> np.nd
 
 
 def show_images(engine: Engine, paths: list[Path], name: str) -> None:
-    imgs = [im for im in (cv2.imread(str(p)) for p in paths[:15]) if im is not None]
+    imgs = [im for im in (read_image(p) for p in paths[:15]) if im is not None]
     if not imgs:
         print("No images available.")
         return
@@ -397,10 +398,10 @@ def people_menu(engine: Engine, console: Console) -> None:
         console.clear()
         people = db.list_persons()
         t = Table(title="Known people")
-        for c in ("Name", "Trusted (no alerts)", "Face samples"):
+        for c in ("Name", "Trusted (no alerts)", "Face samples", "Photo folder"):
             t.add_column(c)
         for p in people:
-            t.add_row(p["name"], "🛡 yes" if p["trusted"] else "no", str(p["samples"]))
+            t.add_row(p["name"], "🛡 yes" if p["trusted"] else "no", str(p["samples"]), f"faces/{p['id']}")
         console.print(t)
         choice = _select("People:", [*(questionary.Choice(p["name"], p) for p in people),
                                      "➕  Enroll a person from a live camera", BACK])
@@ -421,7 +422,7 @@ def people_menu(engine: Engine, console: Console) -> None:
             enroll_flow(engine, console, name=p["name"])
         elif "View" in action:
             folder = engine.data / "faces" / str(p["id"])
-            show_images(engine, sorted(folder.glob("*.jpg"), reverse=True), f"person_{p['id']}")
+            show_images(engine, image_files(folder)[::-1], f"person_{p['id']}")
         elif "Rename" in action:
             new = _text("New name:", default=p["name"])
             if new and new.strip() != p["name"]:
@@ -677,17 +678,26 @@ SETTINGS = [
 ]
 
 
+REBUILD_FACES = "🔄  Rebuild face database from the photos in the faces folder"
+
+
 def settings_menu(engine: Engine, console: Console) -> None:
     cfg = engine.cfg
     while True:
         console.clear()
         choices = []
         for section, key, desc in SETTINGS:
-            val = getattr(getattr(cfg, section), key)
-            choices.append(questionary.Choice(f"{desc:<62} {val}", (section, key)))
-        choice = _select("Settings (saved to config.yaml):", [*choices, BACK])
+            obj = getattr(cfg, section)
+            val = getattr(obj, key)
+            default = field_default(type(obj), key)
+            changed = f"   (default {yaml_scalar(default)})" if val != default else ""
+            choices.append(questionary.Choice(f"{desc:<62} {yaml_scalar(val)}{changed}", (section, key)))
+        choice = _select("Settings (saved to config.yaml):", [*choices, REBUILD_FACES, BACK])
         if choice is None or choice == BACK:
             return
+        if choice == REBUILD_FACES:
+            rebuild_faces_flow(engine, console)
+            continue
         section, key = choice
         obj = getattr(cfg, section)
         ftype = {f.name: f.type for f in fields(obj)}[key]
@@ -696,7 +706,8 @@ def settings_menu(engine: Engine, console: Console) -> None:
             if ftype in ("bool", bool):
                 new = not cur
             else:
-                raw = _text(f"{section}.{key}:", default=str(cur))
+                default = yaml_scalar(field_default(type(obj), key))
+                raw = _text(f"{section}.{key} (default {default}):", default=str(cur))
                 if raw is None:
                     continue
                 new = {"int": int, "float": float}.get(str(ftype), str)(raw)
@@ -708,3 +719,50 @@ def settings_menu(engine: Engine, console: Console) -> None:
         if (section, key) == ("face", "match_threshold"):
             engine.db.threshold = new
         cfg.save()
+
+
+def rebuild_faces_flow(engine: Engine, console: Console) -> None:
+    db = engine.db
+    folder = engine.data / "faces"
+    console.clear()
+    console.print(f"Rebuilds everyone's face samples from the photos in [b]{folder}[/]:\n"
+                  "  • each person's folder is their id (see People & faces), e.g. faces/2 → samples for person 2\n"
+                  "  • photos you moved, added (jpg/png) or deleted there are picked up\n"
+                  "  • samples without a photo are dropped; photos are never deleted\n")
+    if not _confirm("Scan the photos now? (nothing is changed until you confirm)", default=True):
+        return
+    with console.status("Scanning photos …") as st:
+        plan = db.plan_rebuild(engine.faces, progress=lambda i, n: st.update(f"Scanning photos {i + 1}/{n} …"))
+
+    t = Table(title="Face samples per person")
+    for c in ("Person", "Folder", "Now", "After rebuild"):
+        t.add_column(c)
+    for p in db.list_persons():
+        after = len(plan.samples.get(p["id"], []))
+        style = "red" if after == 0 else ("yellow" if after != p["samples"] else "")
+        t.add_row(p["name"], f"faces/{p['id']}", str(p["samples"]), f"[{style}]{after}[/]" if style else str(after))
+    console.print(t)
+    for title, paths in (("No face found (skipped)", plan.no_face),
+                         ("More than one face (skipped — crop to one person)", plan.multi_face),
+                         ("Could not read (skipped)", plan.unreadable),
+                         ("Not a known person's folder (ignored)", plan.stray)):
+        if paths:
+            console.print(f"\n[yellow]{title}:[/] {len(paths)}")
+            for p in paths[:10]:
+                console.print(f"  {p.relative_to(folder)}")
+            if len(paths) > 10:
+                console.print(f"  … and {len(paths) - 10} more")
+    names = {p["id"]: p["name"] for p in db.list_persons()}
+    empty = [names[pid] for pid, rows in plan.samples.items() if not rows and pid in names]
+    if empty:
+        console.print(f"\n[red]Will no longer be recognised (no usable photos):[/] {', '.join(empty)}")
+    big = [names[pid] for pid, rows in plan.samples.items() if len(rows) > MAX_EMBEDDINGS_PER_PERSON and pid in names]
+    if big:
+        console.print(f"\n[yellow]More than {MAX_EMBEDDINGS_PER_PERSON} photos:[/] {', '.join(big)} — enrolling more "
+                      "samples later deletes their oldest photos (by file date) down to that limit.")
+    console.print()
+    if not _confirm("Replace the face database with these samples?", default=False):
+        return
+    db.apply_rebuild(plan)
+    console.print(f"[green]Face database rebuilt[/] — {sum(map(len, plan.samples.values()))} samples.")
+    _pause()

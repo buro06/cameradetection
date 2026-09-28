@@ -11,8 +11,9 @@ import sqlite3
 import threading
 import time
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 import cv2
 import numpy as np
@@ -28,6 +29,23 @@ MODEL_URLS = {
 YUNET_MAX_SIDE = 640
 MAX_EMBEDDINGS_PER_PERSON = 60
 MAX_EMBEDDINGS_PER_UNKNOWN = 20
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+REBUILD_DETECTOR_SCORE = 0.6  # photos in a person's folder were chosen by a human, so detect more leniently
+REBUILD_SECOND_FACE_RATIO = 0.6  # a second face at least this wide (vs the main one) makes a photo ambiguous
+
+
+def read_image(path: Path) -> np.ndarray | None:
+    """cv2.imread that also works for non-ASCII paths on Windows."""
+    try:
+        return cv2.imdecode(np.fromfile(str(path), dtype=np.uint8), cv2.IMREAD_COLOR)
+    except (OSError, ValueError, cv2.error):
+        return None
+
+
+def image_files(folder: Path) -> list[Path]:
+    if not folder.is_dir():
+        return []
+    return sorted(p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXTS)
 
 
 def ensure_models(models_dir: Path) -> dict[str, Path]:
@@ -129,6 +147,18 @@ def _context_crop(frame: np.ndarray, box: tuple[int, int, int, int], pad: float 
 
 def _vec(blob: bytes) -> np.ndarray:
     return np.frombuffer(blob, dtype=np.float32)
+
+
+@dataclass
+class RebuildPlan:
+    """Result of scanning data/faces/<person id>/ — applied with FaceDB.apply_rebuild()."""
+    samples: dict[int, list[tuple[np.ndarray, str, float]]]  # person id -> (embedding, image path, file mtime)
+    before: dict[int, int]  # person id -> sample count before the rebuild
+    no_face: list[Path] = field(default_factory=list)
+    multi_face: list[Path] = field(default_factory=list)
+    unreadable: list[Path] = field(default_factory=list)
+    stray: list[Path] = field(default_factory=list)  # files/folders not belonging to a known person
+    last_embedding_id: int = 0  # detects samples added while scanning
 
 
 class FaceDB:
@@ -278,6 +308,54 @@ class FaceDB:
             self._db.execute("DELETE FROM persons WHERE id=?", (person_id,))
             self._db.commit()
             shutil.rmtree(self.dir / "faces" / str(person_id), ignore_errors=True)
+            self._reload()
+
+    # ---- rebuild from photos -------------------------------------------------
+    def plan_rebuild(self, faces: FaceEngine, progress: Callable[[int, int], None] | None = None) -> RebuildPlan:
+        """Re-embed every photo in faces/<person id>/. Slow, so it runs without holding the DB lock."""
+        with self._lock:
+            before = {p["id"]: p["samples"] for p in self.list_persons()}
+            last_id = self._db.execute("SELECT COALESCE(MAX(id), 0) FROM embeddings").fetchone()[0]
+        plan = RebuildPlan(samples={pid: [] for pid in before}, before=before, last_embedding_id=last_id)
+        todo: list[tuple[int, Path]] = []
+        for entry in sorted((self.dir / "faces").iterdir()):
+            if entry.is_dir() and entry.name.isdigit() and int(entry.name) in before:
+                todo += [(int(entry.name), p) for p in image_files(entry)]
+            elif entry.is_dir() or entry.suffix.lower() in IMAGE_EXTS:
+                plan.stray.append(entry)
+        min_score = min(faces.cfg.detector_score, REBUILD_DETECTOR_SCORE)
+        for i, (pid, path) in enumerate(todo):
+            if progress:
+                progress(i, len(todo))
+            img = read_image(path)
+            if img is None:
+                plan.unreadable.append(path)
+                continue
+            found = faces.analyze(img, None, max_faces=2, min_score=min_score)
+            if not found:
+                plan.no_face.append(path)
+                continue
+            if len(found) > 1:
+                w0, w1 = (f.box[2] - f.box[0] for f in found[:2])
+                if w1 >= REBUILD_SECOND_FACE_RATIO * w0:
+                    plan.multi_face.append(path)
+                    continue
+            plan.samples[pid].append((found[0].embedding, str(path), path.stat().st_mtime))
+        return plan
+
+    def apply_rebuild(self, plan: RebuildPlan) -> None:
+        """Replace all known-person embeddings with the ones from `plan`. Photos are never deleted."""
+        with self._lock:
+            last_id = self._db.execute("SELECT COALESCE(MAX(id), 0) FROM embeddings").fetchone()[0]
+            if last_id != plan.last_embedding_id:
+                raise RuntimeError("Face samples were added while scanning — run the rebuild again.")
+            existing = set(self._persons)
+            self._db.execute("DELETE FROM embeddings")
+            self._db.executemany(
+                "INSERT INTO embeddings (person_id, vec, image, created) VALUES (?,?,?,?)",
+                [(pid, emb.astype(np.float32).tobytes(), image, mtime)
+                 for pid, rows in plan.samples.items() if pid in existing for emb, image, mtime in rows])
+            self._db.commit()
             self._reload()
 
     # ---- unknowns -------------------------------------------------------------

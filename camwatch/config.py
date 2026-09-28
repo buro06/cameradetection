@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import threading
-from dataclasses import asdict, dataclass, field, fields, is_dataclass
+from dataclasses import MISSING, asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any
 
@@ -129,8 +129,63 @@ class AppConfig:
         path = Path(path or self._path)
         with self._lock:
             tmp = path.with_suffix(path.suffix + ".tmp")
-            tmp.write_text(yaml.safe_dump(self.to_dict(), sort_keys=False), encoding="utf-8")
+            tmp.write_text(self.to_yaml(), encoding="utf-8")
             os.replace(tmp, path)
+
+    def to_yaml(self) -> str:
+        """YAML where every value that differs from its default carries a `# default: …` comment."""
+        lines = ["# camwatch configuration. Changed settings show their default in a comment."]
+        for f in fields(self):
+            if f.name.startswith("_"):
+                continue
+            v = getattr(self, f.name)
+            if is_dataclass(v) or f.name == "cameras":
+                lines.append("")
+            if is_dataclass(v):
+                lines.append(f"{f.name}:")
+                lines += _yaml_fields(v, "  ")
+            elif f.name == "cameras":
+                lines.append("cameras:" if v else "cameras: []")
+                for cam in v:
+                    first, *rest = _yaml_fields(cam, "    ")
+                    lines += ["  - " + first.lstrip(), *rest]
+            else:
+                lines.append(_yaml_line(f.name, v, field_default(type(self), f.name), ""))
+        return "\n".join(lines).rstrip() + "\n"
+
+
+_NO_DEFAULT = object()
+
+
+def field_default(cls, name: str) -> Any:
+    """Default value of dataclass field `name`, or _NO_DEFAULT if it has none (e.g. a camera's source)."""
+    f = next(f for f in fields(cls) if f.name == name)
+    if f.default is not MISSING:
+        return f.default
+    if f.default_factory is not MISSING:
+        return f.default_factory()
+    return _NO_DEFAULT
+
+
+def has_default(value: Any) -> bool:
+    return value is not _NO_DEFAULT
+
+
+def yaml_scalar(v: Any) -> str:
+    """One-line YAML for a scalar or a flat list, e.g. 0.4, true, '0', [1, 2]."""
+    s = yaml.safe_dump(v, default_flow_style=True, width=1 << 30).rstrip("\n")
+    return s.removesuffix("\n...")
+
+
+def _yaml_line(key: str, value: Any, default: Any, indent: str) -> str:
+    line = f"{indent}{key}: {yaml_scalar(value)}"
+    if has_default(default) and value != default:
+        line += f"  # default: {yaml_scalar(default)}"
+    return line
+
+
+def _yaml_fields(obj: Any, indent: str) -> list[str]:
+    return [_yaml_line(f.name, getattr(obj, f.name), field_default(type(obj), f.name), indent) for f in fields(obj)]
 
 
 def _build(cls, data: dict | None):
