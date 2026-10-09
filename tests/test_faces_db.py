@@ -103,3 +103,51 @@ def test_rebuild_refuses_if_samples_added_while_scanning(db, tmp_path):
     db.add_embedding(a, unit(21), None)
     with pytest.raises(RuntimeError):
         db.apply_rebuild(plan)
+
+
+# ---- face model changes ------------------------------------------------------------------------
+class EmbedByColour:
+    """Fake face engine: one face per image, embedded from the image's colour (same photo -> same vector)."""
+
+    model_id = "buffalo_l"
+
+    def __init__(self):
+        from camwatch.config import FaceConfig
+        self.cfg = FaceConfig()
+
+    def analyze(self, img, region=None, max_faces=1, min_score=None):
+        if img.mean() < 1:  # black image: no face found
+            return []
+        return [face((0, 0, 10, 10), unit(int(img.mean())))]
+
+
+def flat(value):
+    return np.full((40, 40, 3), value, np.uint8)
+
+
+def test_new_database_just_records_the_face_model(db):
+    assert db.embedding_model() is None
+    assert db.migrate_embeddings(EmbedByColour()) is None
+    assert db.embedding_model() == "buffalo_l"
+
+
+def test_face_model_change_re_embeds_stored_photos(db):
+    old = lambda seed: unit(seed)[:128] / np.linalg.norm(unit(seed)[:128])  # SFace-sized vectors
+    alice = db.add_person("Alice", trusted=True)
+    db.add_embedding(alice, old(1), flat(40))
+    db.add_embedding(alice, old(2), None)  # no photo: can't be re-embedded
+    bob = db.add_person("Bob")
+    db.add_embedding(bob, old(3), None)
+    kept = db.record_unknown(old(4), flat(90), 0.9, "cam")
+    gone = db.record_unknown(old(5), flat(0), 0.9, "cam")  # its only photo has no detectable face
+    assert db.embedding_model() == "sface"
+
+    summary = db.migrate_embeddings(EmbedByColour())
+
+    assert summary["people"] == {"Alice": 1, "Bob": 0} and summary["empty"] == ["Bob"]
+    assert db.embedding_model() == "buffalo_l"
+    m = db.match(unit(40))
+    assert m and m.name == "Alice" and m.score == pytest.approx(1.0)
+    assert [u["id"] for u in db.list_unknowns()] == [kept] and not db.unknown_exists(gone)
+    assert db.record_unknown(unit(90), flat(90), 0.9, "cam") == kept  # matches the re-embedded cluster
+    assert db.migrate_embeddings(EmbedByColour()) is None  # only once

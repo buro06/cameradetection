@@ -17,9 +17,14 @@ detection:
                                 # as another person (filters split-second duplicate boxes; 0 = off)
 
 face:
-  detector_score: 0.85
+  model: buffalo_l        # InsightFace SCRFD + ArcFace (non-commercial weights); downloaded to data/models
+  device: auto            # auto (GPU if onnxruntime can use it, else CPU) | cuda | cpu
+  detector_score: 0.5     # SCRFD face confidence
   min_face_px: 40         # faces smaller than this are not recognised
-  match_threshold: 0.40   # SFace cosine similarity; raise to 0.45 for fewer false matches
+  check_fps: 2.0          # face checks per second per person while identifying them
+  match_threshold: 0.35   # ArcFace cosine similarity; raise to 0.4 for fewer false matches
+  quality_min_sharpness: 25.0  # blurrier faces don't vote on who someone is
+  quality_max_turn: 0.45  # nor do faces turned further away (0 = straight on, ~0.5 = 45°)
   trusted_min_matches: 2  # consistent matches needed before a trusted face suppresses an alert
   save_unknowns: true
   max_unknown_images: 5
@@ -30,6 +35,7 @@ events:
   cooldown_seconds: 60    # same person leaving and returning within this time doesn't re-alert (per camera)
   track_ttl: 2.0
   lost_memory_seconds: 30 # a still person hidden this long and reappearing in place isn't a new arrival
+  handoff_seconds: 1.5    # a walker lost and re-found nearby within this time keeps their track
 
 clip:
   fps: 15
@@ -44,6 +50,7 @@ telegram:
   chat_ids: []            # chats that receive alerts (use `camwatch setup` to discover)
   allowed_user_ids: []    # users allowed to send commands from any chat
   send_unknown_faces: true
+  min_alert_interval_seconds: 30  # hard cooldown per camera: later alerts are clipped + logged, not sent
 
 cameras:
   - name: front-door

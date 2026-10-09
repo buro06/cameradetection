@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from dataclasses import MISSING, asdict, dataclass, field, fields, is_dataclass
@@ -10,6 +11,7 @@ from typing import Any
 
 import yaml
 
+log = logging.getLogger(__name__)
 DEFAULT_CONFIG_PATH = Path(os.environ.get("CAMWATCH_CONFIG", "config.yaml"))
 
 
@@ -46,9 +48,15 @@ class DetectionConfig:
 
 @dataclass
 class FaceConfig:
-    detector_score: float = 0.85
+    model: str = "buffalo_l"  # InsightFace model pack: SCRFD-10G face detector + ArcFace R50 recognizer
+    device: str = "auto"  # auto (GPU if onnxruntime can use it) | cuda | cpu
+    detector_score: float = 0.5  # SCRFD face confidence
     min_face_px: int = 40
-    match_threshold: float = 0.40  # SFace cosine similarity (OpenCV suggests 0.363)
+    check_fps: float = 2.0  # face checks per second per person while identifying them (each costs GPU/CPU time)
+    match_threshold: float = 0.35  # ArcFace cosine similarity; raise for fewer false matches
+    # Blurry or turned-away faces don't vote on who someone is, and aren't saved or enrolled.
+    quality_min_sharpness: float = 25.0  # detail left in the aligned face (Laplacian variance); lower = blurrier
+    quality_max_turn: float = 0.45  # how far the face is turned from the camera (0 = straight on, ~0.5 = 45°)
     trusted_min_matches: int = 2  # face matches needed before a trusted person suppresses alerts
     save_unknowns: bool = True
     max_unknown_images: int = 5  # face crops kept per unknown cluster
@@ -61,6 +69,8 @@ class EventConfig:
     cooldown_seconds: float = 60.0  # same person leaving and coming back within this time doesn't re-alert
     track_ttl: float = 2.0  # seconds a track survives without detections
     lost_memory_seconds: float = 30.0  # a still person hidden this long and reappearing in place isn't "new"
+    # a moving person lost and re-found nearby within this time keeps their track (walking across the room)
+    handoff_seconds: float = 1.5
 
 
 @dataclass
@@ -79,6 +89,8 @@ class TelegramConfig:
     chat_ids: list[int] = field(default_factory=list)  # chats that receive alerts
     allowed_user_ids: list[int] = field(default_factory=list)  # users allowed to send commands
     send_unknown_faces: bool = True
+    # hard cooldown per camera: alerts within this time of the last one sent are logged and clipped, not sent
+    min_alert_interval_seconds: float = 30.0
 
 
 @dataclass
@@ -197,6 +209,20 @@ def _build(cls, data: dict | None):
     return cls(**data)
 
 
+LEGACY_FACE_KEYS = ("detector_score", "match_threshold")  # tuned for YuNet + SFace; wrong for SCRFD + ArcFace
+
+
+def _migrate_face(face: dict | None) -> dict | None:
+    """A face section without `model` was written for YuNet + SFace: its thresholds don't fit the new models."""
+    if not face or "model" in face:
+        return face
+    dropped = [k for k in LEGACY_FACE_KEYS if k in face]
+    if dropped:
+        log.warning("Face recognition now uses InsightFace %s: resetting %s to the new defaults",
+                    FaceConfig.model, ", ".join(dropped))
+    return {k: v for k, v in face.items() if k not in LEGACY_FACE_KEYS}
+
+
 def load_config(path: Path | str = DEFAULT_CONFIG_PATH) -> AppConfig:
     path = Path(path)
     raw: dict[str, Any] = {}
@@ -206,7 +232,7 @@ def load_config(path: Path | str = DEFAULT_CONFIG_PATH) -> AppConfig:
         data_dir=raw.get("data_dir", "data"),
         rtsp_transport=raw.get("rtsp_transport", "tcp"),
         detection=_build(DetectionConfig, raw.get("detection")),
-        face=_build(FaceConfig, raw.get("face")),
+        face=_build(FaceConfig, _migrate_face(raw.get("face"))),
         events=_build(EventConfig, raw.get("events")),
         clip=_build(ClipConfig, raw.get("clip")),
         telegram=_build(TelegramConfig, raw.get("telegram")),

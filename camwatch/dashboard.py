@@ -17,8 +17,8 @@ from rich.text import Text
 from .engine import Engine
 from .timefmt import clock
 
-DECISION_STYLE = {"alert": "bold red", "trusted": "green", "cooldown": "yellow", "disarmed": "dim",
-                  "unchanged": "dim"}
+DECISION_STYLE = {"alert": "bold red", "rate-limited": "red", "trusted": "green", "cooldown": "yellow",
+                  "disarmed": "dim", "unchanged": "dim"}
 
 
 class LogBuffer(logging.Handler):

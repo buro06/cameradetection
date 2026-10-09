@@ -21,6 +21,18 @@ def make_monitor(cfg, db, armed=True):
     return mon, faces
 
 
+def feed(mon, t, boxes_per_frame, results, faces=None, face_per_frame=None):
+    """One inference per entry (0.2 s apart); returns the time after the last frame."""
+    for i, boxes in enumerate(boxes_per_frame):
+        if faces is not None and face_per_frame is not None:
+            faces.faces = face_per_frame(i)
+        mon.process(FRAME, dets(*boxes), t)
+        if r := mon.tick(t):
+            results.append(r)
+        t += 0.2
+    return t
+
+
 def walk_out(mon, t, results):
     """Person at LEFT walks off to the right and out of view."""
     for step in range(10):
@@ -72,9 +84,10 @@ def test_face_below_head_region_is_ignored():
 
 def test_tracker_keeps_identity_while_moving():
     tr = Tracker(ttl=2.0)
-    a = tr.update(dets(LEFT), 0.0)[0]
-    b = tr.update(dets([130, 100, 430, 700]), 0.2)[0]
-    assert a.id == b.id and b.hits == 2
+    assert tr.update(dets(LEFT), 0.0) == []  # a new box needs a second detection, even on the first frame
+    a = tr.update(dets([130, 100, 430, 700]), 0.2)[0]
+    b = tr.update(dets([160, 100, 460, 700]), 0.4)[0]
+    assert a.id == b.id and a.first_seen == 0.0 and b.hits == 3
     tr.update(dets(), 3.0)
     assert not tr.tracks
 
@@ -378,3 +391,124 @@ def test_quick_visitor_apart_from_others_is_not_delayed(cfg, db):
     results += run(mon, [LEFT, RIGHT], t, 0.6)[0]  # stranger across the room for 3 frames
     results += run(mon, [LEFT], t + 0.6, 8)[0]
     assert [r.decision for r in results] == ["trusted", "alert"]
+
+
+# ---- one person stays one person -----------------------------------------------------------------
+def test_fast_walker_with_missed_detections_stays_one_person(cfg, db):
+    alice = unit(10)
+    enroll(db, "Alice", alice, trusted=False)
+    mon, faces = make_monitor(cfg, db)
+    results, t = [], 0.0
+    for step in range(9):  # walking 110 px per frame; detector misses her for two frames mid-way
+        x = 50 + 110 * step
+        faces.faces = [face((x + 100, 120, x + 200, 230), alice)] if step < 4 else []
+        mon.process(FRAME, dets([x, 100, x + 300, 700]) if step not in (5, 6) else dets(), t)
+        if r := mon.tick(t):
+            results.append(r)
+        t += 0.2
+    results += run(mon, [], t, 6)[0]
+    assert [r.decision for r in results] == ["alert"]
+    assert [p.label for p in results[0].people] == ["Alice"]  # not "Alice" + "Unknown person"
+
+
+def test_trusted_person_lost_mid_walk_is_handed_back_their_track(cfg, db):
+    alice = unit(10)
+    enroll(db, "Alice", alice, trusted=True)
+    mon, faces = make_monitor(cfg, db)
+    faces.faces = [face(LEFT_FACE, alice)]
+    results, t = run(mon, [LEFT], 0.0, 8)
+    faces.faces = []  # she turns and walks away from the camera
+    walk = [[[100 + 60 * i, 100, 400 + 60 * i, 700]] for i in range(1, 5)]
+    walk += [[]] * 3  # lost for 0.6 s while she turns back and sits down (nothing a motion model predicts)
+    t = feed(mon, t, walk, results)
+    results += run(mon, [[250, 380, 510, 690]], t, 8)[0]
+    assert [r.decision for r in results] == ["trusted"]
+    assert len(mon.tracker.tracks) == 1
+
+
+def test_person_leaving_through_the_side_is_not_handed_to_a_newcomer(cfg, db):
+    alice = unit(10)
+    enroll(db, "Alice", alice, trusted=True)
+    mon, faces = make_monitor(cfg, db)
+    faces.faces = [face(RIGHT_FACE, alice)]
+    results, t = run(mon, [RIGHT], 0.0, 8)
+    faces.faces = []
+    t = feed(mon, t, [[[800 + 60 * i, 100, 1100 + 60 * i, 700]] for i in range(1, 4)] + [[]] * 2, results)
+    newcomer = [[[960 - 30 * i, 100, 1260 - 30 * i, 700]] for i in range(40)]  # someone walks in right there
+    t = feed(mon, t, newcomer, results)
+    assert [r.decision for r in results] == ["trusted", "alert"]
+
+
+def test_stranger_mistaken_for_handed_off_trusted_person_is_split_off(cfg, db):
+    alice = unit(10)
+    enroll(db, "Alice", alice, trusted=True)
+    mon, faces = make_monitor(cfg, db)
+    faces.faces = [face(LEFT_FACE, alice)]
+    results, t = run(mon, [LEFT], 0.0, 8)
+    faces.faces = []
+    walk = [[[100 + 60 * i, 100, 400 + 60 * i, 700]] for i in range(1, 5)] + [[]] * 3
+    t = feed(mon, t, walk, results)
+    # Alice is gone; a stranger appears just where she would be and shows a clear face
+    stranger_face = lambda i: [face((520 + 40 * i, 180, 620 + 40 * i, 290), unit(77))]
+    t = feed(mon, t, [[[420 + 40 * i, 160, 720 + 40 * i, 760]] for i in range(40)], results, faces, stranger_face)
+    assert [r.decision for r in results] == ["trusted", "alert"]
+    assert [p.label for p in results[1].people if p.new][0].startswith("Unknown")
+
+
+def test_same_person_on_two_tracks_in_one_event_is_listed_once(cfg, db):
+    bob = unit(20)
+    enroll(db, "Bob", bob, trusted=False)
+    mon, faces = make_monitor(cfg, db)
+    faces.faces = [face(LEFT_FACE, bob), face(RIGHT_FACE, bob)]
+    results, t = run(mon, [LEFT], 0.0, 1.0)
+    results += run(mon, [RIGHT], t, 8)[0]  # re-found across the room: a second track
+    assert [r.decision for r in results] == ["alert"]
+    assert [p.label for p in results[0].people] == ["Bob"]
+    assert len(results[0].labels) == 2  # both tracks still labelled in the clip
+
+
+def test_weak_detections_keep_a_person_but_cannot_start_one(cfg, db):
+    mon, _ = make_monitor(cfg, db)
+    weak = np.array([[*LEFT, 0.3]], np.float32)
+    for i in range(10):  # a blurry/half-hidden shape alone never becomes a person
+        mon.process(FRAME, weak, i * 0.2)
+    assert not [t for t in mon.tracker.tracks.values() if t.confirmed]
+    mon2, _ = make_monitor(cfg, db)
+    results, t = run(mon2, [RIGHT], 0.0, 1)
+    tid = next(iter(mon2.tracker.tracks))
+    for _ in range(10):  # the same person, now only weakly detected (turning away, motion blur)
+        mon2.process(FRAME, np.array([[*RIGHT, 0.3]], np.float32), t)
+        t += 0.2
+    assert list(mon2.tracker.tracks) == [tid]
+
+
+# ---- poor-quality faces --------------------------------------------------------------------------
+def test_blurry_faces_do_not_vote_or_become_unknowns(cfg, db):
+    alice = unit(10)
+    enroll(db, "Alice", alice, trusted=True)
+    mon, faces = make_monitor(cfg, db)
+    blurry = face(LEFT_FACE, unit(300))
+    blurry.issue = "blurry"
+    faces.faces = [blurry]  # a smeared face that would match nobody
+    results, t = run(mon, [LEFT], 0.0, 6)
+    assert [p.label for p in results[0].people] == ["Unknown person (no clear face)"]
+    assert db.list_unknowns() == []
+    faces.faces = [face(LEFT_FACE, alice)]  # she turns to the camera
+    results += run(mon, [LEFT], t, 6)[0]
+    assert [r.decision for r in results] == ["alert", "trusted"]
+
+
+def test_poor_face_does_not_outvote_a_clear_trusted_match(cfg, db):
+    alice = unit(10)
+    enroll(db, "Alice", alice, trusted=True)
+    mon, faces = make_monitor(cfg, db)
+    clear, turned = face(LEFT_FACE, alice), face(LEFT_FACE, unit(301))
+    turned.issue = "turned away"
+    results, t = [], 0.0
+    for i in range(30):  # mostly turned away, clear now and then
+        faces.faces = [clear] if i % 5 == 0 else [turned]
+        mon.process(FRAME, dets(LEFT), t)
+        if r := mon.tick(t):
+            results.append(r)
+        t += 0.2
+    assert [r.decision for r in results] == ["trusted"]

@@ -6,7 +6,7 @@ from camwatch.faces import FaceDB, FaceObs
 
 
 def unit(seed: int) -> np.ndarray:
-    v = np.random.default_rng(seed).normal(size=128).astype(np.float32)
+    v = np.random.default_rng(seed).normal(size=512).astype(np.float32)
     return v / np.linalg.norm(v)
 
 

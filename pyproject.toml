@@ -11,8 +11,11 @@ requires-python = ">=3.11"
 license = { text = "AGPL-3.0-or-later" }  # inherits Ultralytics' AGPL-3.0
 dependencies = [
     # Install torch/torchvision FIRST from the CUDA index that matches your GPU (see README).
-    "ultralytics>=8.3",
+    "ultralytics>=8.4,<8.5",  # camwatch uses its ByteTrack tracker directly (internal API)
     "opencv-python>=4.8",
+    # face models (InsightFace buffalo_l); the GPU build falls back to the CPU on its own
+    "onnxruntime-gpu>=1.20; sys_platform != 'darwin'",
+    "onnxruntime>=1.20; sys_platform == 'darwin'",
     "numpy",
     "pyyaml",
     "requests",

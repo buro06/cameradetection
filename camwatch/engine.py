@@ -34,6 +34,19 @@ class EventLogEntry:
     clip: str | None = None
 
 
+class AlertLimiter:
+    """Hard per-camera cooldown for Telegram: at most one alert per `interval` seconds on each camera."""
+
+    def __init__(self):
+        self._last: dict[str, float] = {}
+
+    def allow(self, camera: str, now: float, interval: float) -> bool:
+        if now - self._last.get(camera, float("-inf")) < interval:
+            return False
+        self._last[camera] = now
+        return True
+
+
 class Engine:
     def __init__(self, cfg: AppConfig):
         self.cfg = cfg
@@ -44,12 +57,14 @@ class Engine:
 
         self.db = FaceDB(self.data, cfg.face.match_threshold)
         self.faces = FaceEngine(self.data / "models", cfg.face)
+        self.db.migrate_embeddings(self.faces)
         self.detector = PersonDetector(cfg.detection, self.data / "models")
 
         self.streams: dict[str, CameraStream] = {}
         self.monitors: dict[str, CameraMonitor] = {}
         self.events: deque[EventLogEntry] = deque(maxlen=100)
         self._alerts: queue.Queue[EventResult] = queue.Queue(maxsize=20)
+        self._limiter = AlertLimiter()
         self._halt = threading.Event()
         self._workers: list[threading.Thread] = []
         self._cam_lock = threading.RLock()
@@ -206,9 +221,14 @@ class Engine:
                 time.sleep(1)
 
     def _on_result(self, result: EventResult) -> None:
+        if result.decision == "alert" and not self._limiter.allow(
+                result.camera, time.monotonic(), self.cfg.telegram.min_alert_interval_seconds):
+            result.decision = "rate-limited"  # still clipped and logged, just not sent
+            log.info("[%s] alert not sent: another one went out less than %gs ago", result.camera,
+                     self.cfg.telegram.min_alert_interval_seconds)
         entry = EventLogEntry(result.wall_time, result.camera, result.decision, result.summary())
         self.events.appendleft(entry)
-        if result.decision == "alert":
+        if result.decision in ("alert", "rate-limited"):
             try:
                 self._alerts.put_nowait((result, entry))
             except queue.Full:
@@ -234,17 +254,20 @@ class Engine:
                 result, entry = self._alerts.get(timeout=1)
             except queue.Empty:
                 continue
-            path = None
-            try:
-                path = write_clip(result, clip_path(self.clips_dir, result), self.cfg.clip)
-                entry.clip = str(path)
-                log.info("[%s] clip saved: %s", result.camera, path.name)
-            except Exception:
-                log.exception("[%s] clip encoding failed", result.camera)
-            self._append_event_log(entry)
-            if self.bot:
-                self.bot.send_alert(result, path)
-            result.frames = []  # free memory
+            self._handle_alert(result, entry)
+
+    def _handle_alert(self, result: EventResult, entry: EventLogEntry) -> None:
+        path = None
+        try:
+            path = write_clip(result, clip_path(self.clips_dir, result), self.cfg.clip)
+            entry.clip = str(path)
+            log.info("[%s] clip saved: %s", result.camera, path.name)
+        except Exception:
+            log.exception("[%s] clip encoding failed", result.camera)
+        self._append_event_log(entry)
+        if self.bot and result.decision == "alert":
+            self.bot.send_alert(result, path)
+        result.frames = []  # free memory
 
     def _housekeeping_loop(self) -> None:
         while not self._halt.wait(5):

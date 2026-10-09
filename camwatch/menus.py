@@ -473,7 +473,9 @@ def enroll_flow(engine: Engine, console: Console, name: str | None = None, sampl
                 elif faces:
                     obs = faces[0]
                     other = db.match(obs.embedding)
-                    if other and other.name.lower() != name.lower() and other.score > 0.5:
+                    if not obs.good:
+                        status = f"[yellow]face {obs.issue}[/] — face the camera, hold still"
+                    elif other and other.name.lower() != name.lower() and other.score > 0.5:
                         conflicts += 1
                         status = f"[yellow]face looks like {other.name} ({other.score:.2f}) — skipped[/]"
                     elif got and max(float(obs.embedding @ g.embedding) for g in got) > 0.93:
@@ -664,14 +666,19 @@ SETTINGS = [
     ("face", "detector_score", "Face detector confidence"),
     ("face", "min_face_px", "Minimum face size in pixels"),
     ("face", "save_unknowns", "Save unknown faces for labeling"),
+    ("face", "quality_min_sharpness", "Blurrier faces than this don't count (Laplacian variance)"),
+    ("face", "quality_max_turn", "Faces turned further don't count (0 = straight on, 0.5 ≈ 45°)"),
     ("events", "cooldown_seconds", "No re-alert if the same person leaves and returns within (s)"),
     ("events", "lost_memory_seconds", "Still person hidden up to this long isn't a new arrival (s)"),
+    ("events", "handoff_seconds", "Lost walker re-found nearby within this keeps their track (s)"),
     ("events", "post_seconds", "Clip seconds after detection (also the identification window)"),
     ("clip", "annotate", "Draw boxes and names on clips"),
     ("clip", "retention_days", "Delete saved clips after N days (0 = keep)"),
     ("telegram", "send_unknown_faces", "Send unknown face photos for labeling"),
+    ("telegram", "min_alert_interval_seconds", "Hard cooldown: at most one Telegram alert per camera per (s)"),
     ("detection", "model", "YOLO model (restart needed)"),
     ("detection", "device", "Device auto/cuda:0/cpu (restart needed)"),
+    ("face", "device", "Face model device auto/cuda/cpu (restart needed)"),
     ("events", "pre_seconds", "Clip seconds before detection (restart needed to increase)"),
     ("clip", "fps", "Clip FPS (restart needed)"),
     ("clip", "max_width", "Clip max width (restart needed)"),

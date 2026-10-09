@@ -1,6 +1,7 @@
-"""Face detection (YuNet), recognition (SFace) and the face database (SQLite).
+"""Face detection (SCRFD), recognition (ArcFace) and the face database (SQLite).
 
-Both models come from the OpenCV Model Zoo (Apache-2.0 / MIT) and run through cv2.dnn.
+Both models come from InsightFace's `buffalo_l` pack (free for non-commercial use, e.g. at home) and run
+through onnxruntime: on the GPU when onnxruntime can use it, otherwise on the CPU.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import sqlite3
 import threading
 import time
 import urllib.request
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -22,15 +24,19 @@ from .config import FaceConfig
 
 log = logging.getLogger(__name__)
 
-MODEL_URLS = {
-    "face_detection_yunet_2023mar.onnx": "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx",
-    "face_recognition_sface_2021dec.onnx": "https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx",
+MODEL_PACKS = {  # pack -> (zip URL, detector file, recognizer file)
+    "buffalo_l": ("https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip",
+                  "det_10g.onnx", "w600k_r50.onnx"),
 }
-YUNET_MAX_SIDE = 640
+DET_SIZES = (320, 480, 640)  # SCRFD input side: the smallest that fits the region (multiples of 32)
+DET_NMS = 0.4
+ARCFACE_TEMPLATE = np.array([[38.2946, 51.6963], [73.5318, 51.5014], [56.0252, 71.7366],
+                             [41.5493, 92.3655], [70.7299, 92.2041]], np.float32)  # 5 points in a 112x112 chip
+EMBEDDING_DIM = 512
 MAX_EMBEDDINGS_PER_PERSON = 60
 MAX_EMBEDDINGS_PER_UNKNOWN = 20
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
-REBUILD_DETECTOR_SCORE = 0.6  # photos in a person's folder were chosen by a human, so detect more leniently
+REBUILD_DETECTOR_SCORE = 0.4  # photos in a person's folder were chosen by a human, so detect more leniently
 REBUILD_SECOND_FACE_RATIO = 0.6  # a second face at least this wide (vs the main one) makes a photo ambiguous
 
 
@@ -48,20 +54,34 @@ def image_files(folder: Path) -> list[Path]:
     return sorted(p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXTS)
 
 
-def ensure_models(models_dir: Path) -> dict[str, Path]:
-    models_dir.mkdir(parents=True, exist_ok=True)
-    paths = {}
-    for name, url in MODEL_URLS.items():
-        path = models_dir / name
-        if not path.exists() or path.stat().st_size < 100_000:
-            log.info("Downloading %s", name)
-            tmp = path.with_suffix(".part")
-            urllib.request.urlretrieve(url, tmp)
-            if tmp.stat().st_size < 100_000:  # git-lfs pointer or error page
-                tmp.unlink()
-                raise RuntimeError(f"Download of {name} failed (file too small). Get it manually from {url}")
-            tmp.replace(path)
-        paths[name] = path
+def ensure_models(models_dir: Path, pack: str = "buffalo_l") -> dict[str, Path]:
+    """Download the model pack once and keep only the two ONNX files camwatch uses."""
+    if pack not in MODEL_PACKS:
+        raise ValueError(f"Unknown face model {pack!r} (available: {', '.join(MODEL_PACKS)})")
+    url, det, rec = MODEL_PACKS[pack]
+    folder = models_dir / pack
+    paths = {"det": folder / det, "rec": folder / rec}
+    if all(p.exists() and p.stat().st_size > 1_000_000 for p in paths.values()):
+        return paths
+    folder.mkdir(parents=True, exist_ok=True)
+    tmp = folder / f"{pack}.zip.part"
+    log.info("Downloading face models %s (~280 MB, once)", pack)
+    urllib.request.urlretrieve(url, tmp)
+    try:
+        with zipfile.ZipFile(tmp) as z:
+            for key, path in paths.items():
+                member = next((n for n in z.namelist() if n.rsplit("/", 1)[-1] == path.name), None)
+                if member is None:
+                    raise RuntimeError(f"{path.name} missing from {url}")
+                part = path.with_suffix(".part")
+                with z.open(member) as src, open(part, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                part.replace(path)
+    except zipfile.BadZipFile:
+        raise RuntimeError(f"Download of {pack} failed (not a zip). Get it manually from {url} "
+                           f"and put {det} and {rec} into {folder}") from None
+    finally:
+        tmp.unlink(missing_ok=True)
     return paths
 
 
@@ -70,8 +90,13 @@ class FaceObs:
     box: tuple[int, int, int, int]  # xyxy in frame coords
     score: float
     quality: float
-    embedding: np.ndarray  # (128,) L2-normalised
+    embedding: np.ndarray  # (512,) L2-normalised
     crop: np.ndarray  # face with context, for humans to look at
+    issue: str = ""  # why the face is too poor to identify from ("" = good)
+
+    @property
+    def good(self) -> bool:
+        return not self.issue
 
 
 @dataclass
@@ -82,13 +107,118 @@ class Match:
     score: float
 
 
+def _sessions(paths: dict[str, Path], device: str):
+    """onnxruntime sessions for detector and recognizer; GPU only if it actually runs (old GPUs may lack kernels)."""
+    if device in ("auto", "cuda"):
+        try:
+            import torch  # noqa: F401  (loads CUDA/cuDNN DLLs that onnxruntime can reuse)
+        except ImportError:
+            pass
+    import onnxruntime as ort
+
+    opts = ort.SessionOptions()
+    opts.log_severity_level = 3  # SCRFD's ONNX declares 640x640 shapes; other input sizes work but warn every call
+    if device in ("auto", "cuda") and "CUDAExecutionProvider" in ort.get_available_providers():
+        if hasattr(ort, "preload_dlls"):
+            try:
+                ort.preload_dlls()
+            except Exception:
+                pass
+        try:
+            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            det = ort.InferenceSession(str(paths["det"]), opts, providers=providers)
+            rec = ort.InferenceSession(str(paths["rec"]), opts, providers=providers)
+            if det.get_providers()[0] == "CUDAExecutionProvider":
+                det.run(None, {det.get_inputs()[0].name: np.zeros((1, 3, 320, 320), np.float32)})
+                rec.run(None, {rec.get_inputs()[0].name: np.zeros((1, 3, 112, 112), np.float32)})
+                return det, rec, "cuda"
+            log.warning("onnxruntime could not start CUDA for face models; using the CPU")
+        except Exception as e:
+            log.warning("Face models can't run on the GPU (%s); using the CPU", str(e).splitlines()[0][:200])
+    elif device == "cuda":
+        log.warning("onnxruntime has no CUDA support installed (pip install onnxruntime-gpu); using the CPU")
+    cpu = ["CPUExecutionProvider"]
+    return (ort.InferenceSession(str(paths["det"]), opts, providers=cpu),
+            ort.InferenceSession(str(paths["rec"]), opts, providers=cpu), "cpu")
+
+
+def _similarity_transform(src: np.ndarray, dst: np.ndarray) -> np.ndarray:
+    """2x3 least-squares similarity transform (Umeyama) mapping src points onto dst, as InsightFace aligns."""
+    n = len(src)
+    mu_s, mu_d = src.mean(0), dst.mean(0)
+    s_c, d_c = src - mu_s, dst - mu_d
+    cov = d_c.T @ s_c / n
+    u, sig, vt = np.linalg.svd(cov)
+    d = np.ones(2)
+    if np.linalg.det(cov) < 0:
+        d[1] = -1
+    r = u @ np.diag(d) @ vt
+    scale = (sig * d).sum() / s_c.var(0).sum()
+    t = mu_d - scale * r @ mu_s
+    return np.hstack([scale * r, t[:, None]]).astype(np.float32)
+
+
+def align_face(img: np.ndarray, kps: np.ndarray) -> np.ndarray:
+    """112x112 face chip with eyes, nose and mouth corners at ArcFace's template positions."""
+    m = _similarity_transform(kps.astype(np.float64), ARCFACE_TEMPLATE.astype(np.float64))
+    return cv2.warpAffine(img, m, (112, 112), borderValue=0.0)
+
+
 class FaceEngine:
     def __init__(self, models_dir: Path, cfg: FaceConfig):
         self.cfg = cfg
-        paths = ensure_models(models_dir)
-        self._det = cv2.FaceDetectorYN.create(str(paths["face_detection_yunet_2023mar.onnx"]), "", (320, 320), 0.5, 0.3, 50)
-        self._rec = cv2.FaceRecognizerSF.create(str(paths["face_recognition_sface_2021dec.onnx"]), "")
-        self._lock = threading.Lock()  # cv2.dnn nets are not thread-safe
+        self.model_id = cfg.model
+        paths = ensure_models(models_dir, cfg.model)
+        self._det, self._rec, self.device = _sessions(paths, cfg.device)
+        self._det_in = self._det.get_inputs()[0].name
+        self._rec_in = self._rec.get_inputs()[0].name
+        self._anchors: dict[tuple[int, int, int], np.ndarray] = {}
+        self._lock = threading.Lock()
+        log.info("Face models %s on %s", cfg.model, self.device)
+
+    # ---- SCRFD -------------------------------------------------------------------
+    def _centres(self, h: int, w: int, stride: int) -> np.ndarray:
+        key = (h, w, stride)
+        if key not in self._anchors:
+            c = np.stack(np.mgrid[:h, :w][::-1], axis=-1).astype(np.float32).reshape(-1, 2) * stride
+            self._anchors[key] = np.repeat(c, 2, axis=0)  # 2 anchors per position
+        return self._anchors[key]
+
+    def _detect(self, img: np.ndarray, min_score: float) -> tuple[np.ndarray, np.ndarray]:
+        """Faces in `img`: (N, 5) boxes x1, y1, x2, y2, score and (N, 5, 2) landmarks, in image coords."""
+        ih, iw = img.shape[:2]
+        side = next((s for s in DET_SIZES if max(ih, iw) <= s), DET_SIZES[-1])
+        scale = side / max(ih, iw)
+        nw, nh = max(1, round(iw * scale)), max(1, round(ih * scale))
+        canvas = np.zeros((side, side, 3), np.uint8)
+        canvas[:nh, :nw] = cv2.resize(img, (nw, nh)) if (nw, nh) != (iw, ih) else img
+        blob = cv2.dnn.blobFromImage(canvas, 1.0 / 128, (side, side), (127.5, 127.5, 127.5), swapRB=True)
+        outs = [o[0] if o.ndim == 3 else o for o in self._det.run(None, {self._det_in: blob})]
+        boxes, kpss = [], []
+        for i, stride in enumerate((8, 16, 32)):
+            scores, dist, kd = outs[i].reshape(-1), outs[i + 3] * stride, outs[i + 6] * stride
+            centres = self._centres(side // stride, side // stride, stride)
+            keep = np.flatnonzero(scores >= min_score)
+            if not len(keep):
+                continue
+            c, d = centres[keep], dist[keep]
+            boxes.append(np.column_stack([c[:, 0] - d[:, 0], c[:, 1] - d[:, 1], c[:, 0] + d[:, 2],
+                                          c[:, 1] + d[:, 3], scores[keep]]))
+            kpss.append(c[:, None, :] + kd[keep].reshape(-1, 5, 2))
+        if not boxes:
+            return np.zeros((0, 5), np.float32), np.zeros((0, 5, 2), np.float32)
+        boxes, kpss = np.vstack(boxes), np.vstack(kpss)
+        xywh = [[b[0], b[1], b[2] - b[0], b[3] - b[1]] for b in boxes]
+        idx = np.array(cv2.dnn.NMSBoxes(xywh, boxes[:, 4].tolist(), min_score, DET_NMS), int).reshape(-1)
+        boxes, kpss = boxes[idx], kpss[idx]
+        boxes[:, :4] /= scale
+        return boxes.astype(np.float32), (kpss / scale).astype(np.float32)
+
+    # ---- ArcFace -----------------------------------------------------------------
+    def _embed(self, chip: np.ndarray) -> np.ndarray:
+        blob = cv2.dnn.blobFromImage(chip, 1.0 / 127.5, (112, 112), (127.5, 127.5, 127.5), swapRB=True)
+        emb = self._rec.run(None, {self._rec_in: blob})[0].reshape(-1).astype(np.float32)
+        return emb / (np.linalg.norm(emb) + 1e-9)
 
     def analyze(self, frame: np.ndarray, region: tuple[float, float, float, float] | None = None,
                 max_faces: int = 1, min_score: float | None = None) -> list[FaceObs]:
@@ -106,30 +236,48 @@ class FaceEngine:
         ch, cw = crop.shape[:2]
         if ch < self.cfg.min_face_px or cw < self.cfg.min_face_px:
             return []
-        s = min(1.0, YUNET_MAX_SIDE / max(ch, cw))
-        small = crop if s >= 1.0 else cv2.resize(crop, (max(1, int(cw * s)), max(1, int(ch * s))))
         min_score = self.cfg.detector_score if min_score is None else min_score
 
         with self._lock:
-            self._det.setInputSize((small.shape[1], small.shape[0]))
-            _, rows = self._det.detect(small)
-            if rows is None:
-                return []
-            rows = rows.copy()
-            rows[:, :14] /= s  # back to crop coordinates
-            rows = rows[rows[:, 14] >= min_score]
-            rows = rows[rows[:, 2] >= self.cfg.min_face_px]
-            rows = rows[np.argsort(-rows[:, 14] * rows[:, 2])][:max_faces]
+            boxes, kpss = self._detect(crop, min_score)
+            widths = boxes[:, 2] - boxes[:, 0]
+            order = [i for i in np.argsort(-boxes[:, 4] * widths) if widths[i] >= self.cfg.min_face_px][:max_faces]
             out = []
-            for row in rows:
-                chip = self._rec.alignCrop(crop, row)
-                emb = self._rec.feature(chip).reshape(-1).astype(np.float32)
-                emb /= np.linalg.norm(emb) + 1e-9
-                x, y, w, h = row[:4]
-                box = (int(x0 + x), int(y0 + y), int(x0 + x + w), int(y0 + y + h))
-                out.append(FaceObs(box=box, score=float(row[14]), quality=float(row[14]) * min(1.0, w / 112.0),
-                                   embedding=emb, crop=_context_crop(frame, box)))
+            for i in order:
+                b, kps = boxes[i], kpss[i]
+                chip = align_face(crop, kps)
+                emb = self._embed(chip)
+                sharp, turn = sharpness(chip), head_turn(kps)
+                box = (int(x0 + b[0]), int(y0 + b[1]), int(x0 + b[2]), int(y0 + b[3]))
+                quality = float(b[4]) * min(1.0, widths[i] / 112.0) * min(1.0, sharp / 100.0)
+                out.append(FaceObs(box=box, score=float(b[4]), quality=quality, embedding=emb,
+                                   crop=_context_crop(frame, box), issue=face_issue(self.cfg, sharp, turn)))
         return out
+
+
+def face_issue(cfg: FaceConfig, sharp: float, turn: float) -> str:
+    """Why a face is too poor to identify someone from, or "" if it is good enough (small faces are never
+    detected in the first place: `min_face_px`)."""
+    if sharp < cfg.quality_min_sharpness:
+        return "blurry"
+    if turn > cfg.quality_max_turn:
+        return "turned away"
+    return ""
+
+
+def sharpness(chip: np.ndarray) -> float:
+    """Variance of the Laplacian of the aligned 112x112 face: high for crisp detail, low for blur."""
+    return float(cv2.Laplacian(cv2.cvtColor(chip, cv2.COLOR_BGR2GRAY), cv2.CV_64F).var())
+
+
+def head_turn(kps: np.ndarray) -> float:
+    """How far the nose sits off the centre line between the eyes, in eye distances (0 = facing the camera)."""
+    eye_a, eye_b, nose = kps[0], kps[1], kps[2]
+    axis = eye_b - eye_a
+    dist = float(np.linalg.norm(axis))
+    if dist < 1:
+        return 1.0
+    return abs(float(np.dot(nose - (eye_a + eye_b) / 2, axis / dist))) / dist
 
 
 def _context_crop(frame: np.ndarray, box: tuple[int, int, int, int], pad: float = 0.5) -> np.ndarray:
@@ -186,6 +334,7 @@ class FaceDB:
             CREATE TABLE IF NOT EXISTS unknown_embeddings (
                 id INTEGER PRIMARY KEY, unknown_id INTEGER NOT NULL REFERENCES unknowns(id) ON DELETE CASCADE,
                 vec BLOB NOT NULL, image TEXT, quality REAL NOT NULL DEFAULT 0, created REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
             """
         )
         self._db.commit()
@@ -197,10 +346,10 @@ class FaceDB:
             self._persons = {pid: (name, bool(tr)) for pid, name, tr in self._db.execute("SELECT id, name, trusted FROM persons")}
             rows = self._db.execute("SELECT person_id, vec FROM embeddings").fetchall()
             self._known_ids = np.array([r[0] for r in rows], dtype=np.int64)
-            self._known = np.stack([_vec(r[1]) for r in rows]) if rows else np.zeros((0, 128), np.float32)
+            self._known = np.stack([_vec(r[1]) for r in rows]) if rows else np.zeros((0, EMBEDDING_DIM), np.float32)
             rows = self._db.execute("SELECT unknown_id, vec FROM unknown_embeddings").fetchall()
             self._unk_ids = np.array([r[0] for r in rows], dtype=np.int64)
-            self._unk = np.stack([_vec(r[1]) for r in rows]) if rows else np.zeros((0, 128), np.float32)
+            self._unk = np.stack([_vec(r[1]) for r in rows]) if rows else np.zeros((0, EMBEDDING_DIM), np.float32)
 
     @staticmethod
     def _best(matrix: np.ndarray, ids: np.ndarray, emb: np.ndarray) -> tuple[int, float] | None:
@@ -357,6 +506,63 @@ class FaceDB:
                  for pid, rows in plan.samples.items() if pid in existing for emb, image, mtime in rows])
             self._db.commit()
             self._reload()
+
+    # ---- model changes ----------------------------------------------------------
+    def embedding_model(self) -> str | None:
+        """Face model the stored embeddings came from (None = empty DB). Before this was recorded: SFace."""
+        with self._lock:
+            row = self._db.execute("SELECT value FROM meta WHERE key='embedding_model'").fetchone()
+            if row:
+                return row[0]
+            used = self._db.execute("SELECT 1 FROM embeddings UNION ALL SELECT 1 FROM unknown_embeddings LIMIT 1").fetchone()
+            return "sface" if used else None
+
+    def set_embedding_model(self, model: str) -> None:
+        with self._lock:
+            self._db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('embedding_model', ?)", (model,))
+            self._db.commit()
+
+    def migrate_embeddings(self, faces: FaceEngine) -> dict | None:
+        """Embeddings from another face model can't be compared with new ones: re-embed every stored photo of
+        known people and unknown clusters with `faces`. Returns a summary, or None if nothing had to change."""
+        old = self.embedding_model()
+        if old == faces.model_id:
+            return None
+        if old is None:
+            self.set_embedding_model(faces.model_id)
+            return None
+        log.warning("Face model changed (%s -> %s): re-embedding stored face photos …", old, faces.model_id)
+        plan = self.plan_rebuild(faces)
+        self.apply_rebuild(plan)
+        empty = [p["name"] for p in self.list_persons() if p["samples"] == 0]
+        kept = dropped = 0
+        with self._lock:
+            min_score = min(faces.cfg.detector_score, REBUILD_DETECTOR_SCORE)
+            for eid, image in self._db.execute("SELECT id, image FROM unknown_embeddings").fetchall():
+                img = read_image(Path(image)) if image else None
+                found = faces.analyze(img, None, max_faces=1, min_score=min_score) if img is not None else []
+                if found:
+                    self._db.execute("UPDATE unknown_embeddings SET vec=? WHERE id=?",
+                                     (found[0].embedding.astype(np.float32).tobytes(), eid))
+                    kept += 1
+                else:
+                    self._db.execute("DELETE FROM unknown_embeddings WHERE id=?", (eid,))
+                    dropped += 1
+            gone = [r[0] for r in self._db.execute(
+                "SELECT id FROM unknowns WHERE id NOT IN (SELECT unknown_id FROM unknown_embeddings)").fetchall()]
+            for uid in gone:
+                self._db.execute("DELETE FROM unknowns WHERE id=?", (uid,))
+                shutil.rmtree(self.dir / "unknown" / str(uid), ignore_errors=True)
+            self._db.commit()
+        self.set_embedding_model(faces.model_id)
+        self._reload()
+        people = {p["name"]: p["samples"] for p in self.list_persons()}
+        log.warning("Face database re-embedded: %s; unknown faces kept %d, dropped %d (%d clusters removed)",
+                    ", ".join(f"{n} {c}" for n, c in people.items()) or "no people", kept, dropped, len(gone))
+        if empty:
+            log.warning("No usable photos left for: %s. Re-enroll them (live camera or Telegram).", ", ".join(empty))
+        return {"people": people, "empty": empty, "unknowns_kept": kept, "unknowns_dropped": dropped,
+                "clusters_removed": len(gone)}
 
     # ---- unknowns -------------------------------------------------------------
     def list_unknowns(self) -> list[dict]:

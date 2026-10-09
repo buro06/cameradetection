@@ -143,12 +143,12 @@ def cmd_doctor(args, console: Console) -> int:
     exe = ffmpeg_exe()
     check("ffmpeg (H.264 clips)", exe is not None, exe or "pip install imageio-ffmpeg")
     try:
-        from .faces import ensure_models
-        with console.status("Checking face models …"):
-            ensure_models(cfg.data_path / "models")
-        check("Face models (YuNet + SFace)", True, str(cfg.data_path / "models"))
+        from .faces import FaceEngine
+        with console.status("Checking face models (first run downloads ~280 MB) …"):
+            fe = FaceEngine(cfg.data_path / "models", cfg.face)
+        check(f"Face models (InsightFace {cfg.face.model})", True, f"on {fe.device} · {cfg.data_path / 'models'}")
     except Exception as e:
-        check("Face models (YuNet + SFace)", False, str(e))
+        check(f"Face models (InsightFace {cfg.face.model})", False, str(e))
     token = cfg.telegram_token()
     if cfg.telegram.enabled and token:
         from .telegram import api_call

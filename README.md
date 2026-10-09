@@ -4,25 +4,30 @@
 
 - **Cameras:** USB webcams, RTSP, HTTP(S) MJPEG/HLS streams, JPEG snapshot URLs, and video files (for testing). Any number of cameras can run at once.
 - **Person detection:** Ultralytics YOLO11, batched across all cameras on the GPU.
-- **Face recognition:** OpenCV Model Zoo **YuNet** (detection) + **SFace** (recognition). Both are fully FOSS (Apache-2.0/MIT) and run through `cv2.dnn`.
+- **Face recognition:** InsightFace **buffalo_l**: **SCRFD-10G** (detection) + **ArcFace R50** (recognition), run through onnxruntime (GPU if it works, otherwise CPU). The model weights are free for non-commercial use only, e.g. at home.
 - **Telegram alerts** include a 5-second H.264 clip, starting the moment the person is detected. The caption names everyone seen (🟢 trusted, 🟠 known, 🔴 unknown).
 - **Trusted people** don't trigger alerts. Unknown faces are saved so you can label them later from Telegram or the CLI.
+- **Hard cooldown:** each camera sends at most one Telegram alert per 30s (`telegram.min_alert_interval_seconds`); later ones are still clipped and logged as `rate-limited`.
 - **Interactive dashboard** with menus. A headless mode is available for running as a service.
 
 ## How alerts are decided
 
 1. YOLO sees a person on **2 inferences**, which filters out one-frame false positives. A box that appears *on top of* someone already tracked must last about **1 second** (`detection.overlap_confirm_seconds`) before it counts as another person. YOLO sometimes boxes the same person twice for a split second, and this stops that from turning into a phantom "Unknown person".
 2. Recording starts at the moment the person was **first detected**. A per-camera ring buffer supplies the frames from before the confirmation. Set `events.pre_seconds` to also include time before detection.
-3. For the next **5s**, detection and face recognition keep running. Each face observation votes on the identity of its tracked person.
+3. For the next **5s**, detection and face recognition keep running. Each face observation votes on the identity of its tracked person. Blurry or turned-away faces (`face.quality_min_sharpness`, `face.quality_max_turn`) don't vote.
 4. When the clip ends, only the people who are **new** in this clip are considered. Everyone already present is listed in the caption for context but can't cause an alert.
    - If all the new people are trusted (confirmed by at least `trusted_min_matches` consistent face matches), **no alert** is sent.
    - Otherwise an alert is sent. The exception is a known person or known unknown face that **left and came back** within `events.cooldown_seconds` (default 60s) on that camera.
    - A person whose face is never visible counts as *unknown* and alerts. Each such person is tracked separately, so a second stranger always alerts.
    - A quick visit alerts too, even if the person leaves before the clip ends.
+   - The same person on two tracks within one clip (same name or unknown-face cluster) is listed once.
+5. An alert that passes all of this still isn't *sent* if the same camera sent one less than `telegram.min_alert_interval_seconds` (30s) ago.
 
 **People who stay are never re-alerted.** A group sitting on the couch alerts once, when they arrive.
 - **Briefly hidden people:** someone who was sitting or standing still and vanishes for a while (someone walks in front, they lean out of view) is re-attached to their original track when they reappear in the same spot. This applies for up to `events.lost_memory_seconds`, default 30s.
-- **People who leave:** someone who was *moving* when they disappeared is treated as gone. A newcomer stepping into that spot or through the same doorway is always treated as new.
+- **People moving around:** ByteTrack (motion prediction) keeps a walking person on one track. If they're still lost for a moment (behind furniture, sitting down) and reappear a plausible step away within `events.handoff_seconds` (1.5s), they get their old track back instead of becoming a new "Unknown person".
+- **People who leave:** someone who was *moving* when they disappeared, and isn't re-found that quickly or left through the side of the frame, is treated as gone. A newcomer stepping into that spot is treated as new.
+- **Mix-ups:** a walker re-found after missed frames is on probation. If two clear faces don't match who they were, they are split off as a new person (and alert), so a stranger can't inherit a trusted person's track.
 - **Trusted people who look away:** once confirmed, a trusted person stays trusted while they're tracked, even when their face is turned away. The exception is when a *different* known person's face starts to outvote them.
 
 If a household member walks in with their face turned away, you get one "Unknown person (face not visible)" alert. Nothing further comes once they sit down.
@@ -46,6 +51,10 @@ camwatch doctor
 ```
 
 `camwatch doctor` should report `CUDA — Quadro M4000 (sm_52)` and `detector device: cuda:0`. If it reports *"not supported by torch …"*, a CUDA 12.8+/13 build of torch was installed. Reinstall with the cu126 command above.
+
+The face models run on `onnxruntime-gpu`, which reuses torch's CUDA libraries. `camwatch doctor` shows whether they run `on cuda` or `on cpu`. If onnxruntime can't use the GPU, they fall back to the CPU by themselves; if that makes the dashboard's inference FPS drop with several people in view, lower `face.check_fps`.
+
+**Upgrading from YuNet + SFace:** on first start the face database is re-embedded from the photos in `data/faces/` and `data/unknown/` (this takes a moment and is logged). Anyone with no usable photo has to be enrolled again. `face.detector_score` and `face.match_threshold` are reset to the new models' defaults.
 
 On macOS or Linux: `python -m venv .venv && . .venv/bin/activate && pip install -e .` (CPU, CUDA, or Apple MPS are picked automatically).
 
@@ -136,13 +145,16 @@ Logs are written to `data/logs/camwatch.log` (rotated), every event to `data/eve
 | USB webcam stuck at 640×360 / 640×480 on Windows | Menu → Cameras → *camera* → **Resolution** (e.g. 1920x1080). If it still doesn't change, try **Pixel format / capture backend** → MJPG, or backend msmf. The Cameras table shows `640x360 (asked 1920x1080)` when the camera ignores the request |
 | USB webcam stuck at ~5 fps at 1080p | Menu → Cameras → *camera* → **Frame rate** → 30 fps (or `fps: 30` under the camera in `config.yaml`). The log line `USB camera opened: 1920x1080 MJPG @ 30 fps` shows what the camera accepted. A warning after 5 s means frames still arrive slowly. If the format shown is YUY2, set **Pixel format** → MJPG or try backend msmf; if it's MJPG, the room is probably too dim |
 | Alerts for people on the street far away | `detection.min_box_height: 0.15` |
-| Wrong name assigned | Move the wrong photos to the right person's folder (or delete them), then Settings → *Rebuild face database*. Raise `face.match_threshold` (0.45–0.5) and enroll more varied samples |
-| Known person shown as unknown | Enroll more samples (different light and angles), or lower `match_threshold` slightly (not below 0.36) |
+| Wrong name assigned | Move the wrong photos to the right person's folder (or delete them), then Settings → *Rebuild face database*. Raise `face.match_threshold` (0.4–0.45) and enroll more varied samples |
+| Known person shown as unknown | Enroll more samples (different light and angles), or lower `match_threshold` slightly (not below 0.28) |
+| Faces often "no clear face" | Lower `face.quality_min_sharpness` or raise `face.quality_max_turn` (more faces vote, but more wrong votes) |
 | Trusted person still triggers alerts | Their face isn't seen clearly during the 5s window. Lower `face.min_face_px`, raise `events.post_seconds`, or mount the camera at face height |
 | Duplicate boxes on one person / phantom "Unknown person (face not visible)" alerts | Raise `detection.overlap_confirm_seconds` (e.g. 2) |
 | Same person alerts again after briefly stepping out | Raise `events.cooldown_seconds` (only applies to recognised faces / unknown-face clusters) |
+| Same person shows up twice / re-alerts while walking around the room | Raise `events.handoff_seconds` (e.g. 2.5) |
+| Too many Telegram alerts | Raise `telegram.min_alert_interval_seconds` |
 | Someone who stays still gets "new" alerts after being hidden a long time | Raise `events.lost_memory_seconds` |
-| GPU overloaded | `detection.model: yolo11n.pt`, or lower `detection.detect_fps` |
+| GPU overloaded | `detection.model: yolo11n.pt`, or lower `detection.detect_fps` / `face.check_fps` |
 
 All settings are documented in `config.example.yaml`.
 
@@ -155,4 +167,4 @@ pytest
 
 ## Licenses
 
-camwatch uses Ultralytics YOLO (AGPL-3.0), so this project is AGPL-3.0 as well. The face models are OpenCV Zoo YuNet (MIT) and SFace (Apache-2.0).
+camwatch uses Ultralytics YOLO (AGPL-3.0), so this project is AGPL-3.0 as well. The face models are InsightFace's buffalo_l pack (SCRFD + ArcFace): the code is MIT, but the pretrained weights are for **non-commercial use only**.
