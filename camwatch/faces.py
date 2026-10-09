@@ -111,7 +111,10 @@ def _sessions(paths: dict[str, Path], device: str):
     """onnxruntime sessions for detector and recognizer; GPU only if it actually runs (old GPUs may lack kernels)."""
     if device in ("auto", "cuda"):
         try:
-            import torch  # noqa: F401  (loads CUDA/cuDNN DLLs that onnxruntime can reuse)
+            import torch  # loads CUDA/cuDNN DLLs that onnxruntime can reuse
+            if device == "auto" and not torch.cuda.is_available():
+                # onnxruntime-gpu lists CUDA even without a GPU and prints missing-library errors when tried
+                device = "cpu"
         except ImportError:
             pass
     import onnxruntime as ort
