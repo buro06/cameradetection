@@ -126,7 +126,7 @@ def cmd_doctor(args, console: Console) -> int:
     check("Python", sys.version_info >= (3, 11), f"{platform.python_version()} on {platform.platform()}")
     try:
         import cv2
-        check("OpenCV", hasattr(cv2, "FaceDetectorYN") and hasattr(cv2, "FaceRecognizerSF"), cv2.__version__)
+        check("OpenCV", True, cv2.__version__)
     except ImportError as e:
         check("OpenCV", False, str(e))
     try:

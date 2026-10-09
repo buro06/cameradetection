@@ -112,6 +112,9 @@ def probe_camera(cam: CameraConfig, cfg: AppConfig, timeout: float = 15.0) -> tu
             break
         time.sleep(0.2)
     stream.stop()
+    # let OpenCV finish its current read: a capture thread still inside it when Python exits
+    # aborts the process on Linux ("FATAL: exception not rethrown")
+    stream.join(timeout=12.0)
     return frame, stream.error
 
 
