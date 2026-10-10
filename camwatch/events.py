@@ -349,7 +349,7 @@ class CameraMonitor:
         """Overlay labels for a snapshot of what the camera sees right now."""
         trusted_map = self.db.trusted_map()
         labels = {PERSON_BOX_ID: PERSON_LABEL, UNCLEAR_FACE_ID: UNCLEAR_LABEL}
-        for f in self.seen.values():
+        for f in list(self.seen.values()):  # called from the UI thread while the detector updates it
             labels[f.id] = f"{f.name}{' (trusted)' if trusted_map.get(f.name) else ''}" if f.name else "Unknown person"
         return labels
 

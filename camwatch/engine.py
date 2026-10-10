@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Callable
 
 import cv2
+import numpy as np
 
 from .camera import STALE_SECONDS, CameraStream, describe_source, set_rtsp_transport
 from .config import AppConfig, CameraConfig
@@ -281,11 +282,13 @@ class Engine:
             self._halt.wait(3600)
 
     # ---- queries -------------------------------------------------------------------
-    def snapshot(self, camera: str) -> bytes | None:
+    def annotated_frame(self, camera: str) -> np.ndarray | None:
+        """The camera's latest frame with the current detections and a time stamp drawn on it."""
         cam = self.cfg.camera(camera)
-        if cam is None or cam.name not in self.streams:
+        with self._cam_lock:
+            stream, mon = (self.streams.get(cam.name), self.monitors.get(cam.name)) if cam else (None, None)
+        if stream is None or mon is None:
             raise KeyError(camera)
-        stream, mon = self.streams[cam.name], self.monitors[cam.name]
         _, _, frame = stream.latest()
         if frame is None:
             return None
@@ -294,6 +297,12 @@ class Engine:
         if overlay and time.monotonic() - overlay.ts < 1.0:
             draw_boxes(img, overlay.boxes, mon.live_labels(), 1.0)
         draw_stamp(img, f"{cam.name}  {stamp(datetime.now())}")
+        return img
+
+    def snapshot(self, camera: str) -> bytes | None:
+        img = self.annotated_frame(camera)
+        if img is None:
+            return None
         ok, jpg = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 88])
         return jpg.tobytes() if ok else None
 

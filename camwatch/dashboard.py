@@ -15,6 +15,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .engine import Engine
+from .liveview import LiveView
 from .timefmt import clock
 
 DECISION_STYLE = {"alert": "bold red", "rate-limited": "red", "trusted": "green", "cooldown": "yellow",
@@ -137,7 +138,7 @@ def render(engine: Engine, logs: LogBuffer, height: int) -> Layout:
         style = {"WARNING": "yellow", "ERROR": "red", "CRITICAL": "bold red"}.get(level, "dim")
         log_text.append(line[:300] + "\n", style=style)
 
-    keys = Text.from_markup("[b]m[/] menu   [b]a[/] arm/disarm all   [b]s[/] save snapshots   [b]q[/] quit")
+    keys = Text.from_markup("[b]m[/] menu   [b]a[/] arm/disarm all   [b]v[/] live view   [b]s[/] save snapshots   [b]q[/] quit")
     layout = Layout()
     layout.split_column(
         Layout(Panel(header, border_style="cyan"), size=3),
@@ -153,26 +154,37 @@ def render(engine: Engine, logs: LogBuffer, height: int) -> Layout:
 def run_dashboard(engine: Engine, logs: LogBuffer, console: Console) -> None:
     from .menus import main_menu, save_snapshots
 
-    while True:
-        quit_requested = False
-        with KeyReader() as keys, Live(render(engine, logs, console.height), console=console, screen=True,
-                                       auto_refresh=False) as live:
-            while True:
-                key = keys.get(0.5)
-                if key in ("q", "Q", "\x03"):
-                    quit_requested = True
-                    break
-                if key in ("m", "M"):
-                    break
-                if key in ("a", "A"):
-                    engine.set_armed(None, not (engine.armed and not engine.disarmed_cameras))
-                if key in ("s", "S"):
-                    save_snapshots(engine, quiet=True)
-                live.update(render(engine, logs, console.height), refresh=True)
-        if quit_requested:
-            return
-        try:
-            if main_menu(engine, console) == "quit":
+    view = LiveView(engine)
+    try:
+        while True:
+            quit_requested = False
+            with KeyReader() as keys, Live(render(engine, logs, console.height), console=console, screen=True,
+                                           auto_refresh=False) as live:
+                drawn = time.monotonic()
+                while True:
+                    key = keys.get(0.03 if view.active else 0.5)  # live windows need frequent redraws
+                    if key in ("q", "Q", "\x03"):
+                        quit_requested = True
+                        break
+                    if key in ("m", "M"):
+                        break
+                    if key in ("a", "A"):
+                        engine.set_armed(None, not (engine.armed and not engine.disarmed_cameras))
+                    if key in ("s", "S"):
+                        save_snapshots(engine, quiet=True)
+                    if key in ("v", "V"):
+                        view.toggle([name for name, s in engine.streams.items() if s.is_live()])
+                    view.pump()
+                    if key or time.monotonic() - drawn >= 0.5:
+                        live.update(render(engine, logs, console.height), refresh=True)
+                        drawn = time.monotonic()
+            if quit_requested:
                 return
-        except KeyboardInterrupt:
-            pass
+            view.hide()  # nothing redraws the windows while a menu is open; they come back afterwards
+            try:
+                if main_menu(engine, console) == "quit":
+                    return
+            except KeyboardInterrupt:
+                pass
+    finally:
+        view.close()

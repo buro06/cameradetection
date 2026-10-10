@@ -85,10 +85,11 @@ Alerts go to `chat_ids`. Commands are accepted only from those chats or from `al
 |---|---|
 | `m` | Menu: cameras, people & faces, review unknown faces, arm/disarm, Telegram, settings |
 | `a` | Arm/disarm all cameras |
+| `v` | Live view: a resizable window per running camera showing the picture and current detections (press again to close) |
 | `s` | Save a snapshot of every camera to `data/snapshots/` |
 | `q` | Quit |
 
-Monitoring keeps running while menus are open.
+Monitoring keeps running while menus are open. Live view windows are hidden while a menu is open and come back when you return to the dashboard. To close a single window, click its close button. Pressing Esc or `q` in any live view window closes all of them.
 
 ### Adding faces
 
