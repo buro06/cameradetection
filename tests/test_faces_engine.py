@@ -53,3 +53,12 @@ def test_alignment_puts_landmarks_on_the_template():
     m = _similarity_transform(kps.astype(np.float64), ARCFACE_TEMPLATE.astype(np.float64))
     mapped = kps @ m[:, :2].T + m[:, 2]
     assert np.allclose(mapped, ARCFACE_TEMPLATE, atol=1e-3)
+
+
+def test_larger_detector_input_still_finds_faces(engine, zidane):
+    engine.cfg.detect_size = 960
+    try:
+        faces = engine.analyze(zidane, None, max_faces=5)
+    finally:
+        engine.cfg.detect_size = 640
+    assert len(faces) == 2 and sum(f.good for f in faces) == 1

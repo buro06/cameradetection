@@ -19,7 +19,9 @@ from .timefmt import stamp
 
 log = logging.getLogger(__name__)
 
-GREEN, ORANGE, RED, WHITE, BLACK = (80, 200, 60), (0, 165, 255), (40, 40, 230), (255, 255, 255), (0, 0, 0)
+GREEN, ORANGE, RED, GREY = (80, 200, 60), (0, 165, 255), (40, 40, 230), (170, 170, 170)
+WHITE, BLACK = (255, 255, 255), (0, 0, 0)
+NEUTRAL_LABELS = {"person", "unclear face", "face"}  # boxes that say nothing about who it is
 
 
 def ffmpeg_exe() -> str | None:
@@ -31,6 +33,8 @@ def ffmpeg_exe() -> str | None:
 
 
 def label_color(label: str) -> tuple[int, int, int]:
+    if label in NEUTRAL_LABELS:
+        return GREY
     if "(trusted)" in label or label.endswith("✓"):
         return GREEN
     if label.lower().startswith(("unknown", "person")):
@@ -40,7 +44,7 @@ def label_color(label: str) -> tuple[int, int, int]:
 
 def draw_boxes(img: np.ndarray, boxes, labels: dict[int, str], scale: float) -> None:
     for tid, (x1, y1, x2, y2) in boxes:
-        label = labels.get(tid, "Person")
+        label = labels.get(tid, "person")
         color = label_color(label)
         p1, p2 = (int(x1 * scale), int(y1 * scale)), (int(x2 * scale), int(y2 * scale))
         thick = max(2, img.shape[1] // 500)

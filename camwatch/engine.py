@@ -115,7 +115,8 @@ class Engine:
     # ---- cameras ---------------------------------------------------------------
     def _start_camera(self, cam: CameraConfig) -> None:
         with self._cam_lock:
-            stream = CameraStream(cam, self.cfg.clip, self.cfg.events.pre_seconds)
+            # the clip starts when someone appeared, which is known `arrive_seconds` later
+            stream = CameraStream(cam, self.cfg.clip, self.cfg.events.pre_seconds + self.cfg.events.arrive_seconds)
             self.streams[cam.name] = stream
             self.monitors[cam.name] = CameraMonitor(self.cfg, stream, self.faces, self.db, self.is_armed)
             stream.start()
@@ -289,11 +290,9 @@ class Engine:
         if frame is None:
             return None
         img = frame.copy()
-        trusted_map = self.db.trusted_map()
         overlay = stream.overlay
         if overlay and time.monotonic() - overlay.ts < 1.0:
-            labels = {tid: mon._label(t, trusted_map) for tid, t in dict(mon.tracker.tracks).items()}
-            draw_boxes(img, overlay.boxes, labels, 1.0)
+            draw_boxes(img, overlay.boxes, mon.live_labels(), 1.0)
         draw_stamp(img, f"{cam.name}  {stamp(datetime.now())}")
         ok, jpg = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 88])
         return jpg.tobytes() if ok else None

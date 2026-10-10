@@ -352,7 +352,9 @@ def scan_usb(cfg: AppConfig, console: Console) -> CameraConfig | None:
 def camera_actions(engine: Engine, console: Console, cam: CameraConfig) -> None:
     cfg = engine.cfg
     usb_actions = ["📐  Resolution", "🎞   Frame rate", "🎛   Pixel format / capture backend"] if is_usb(cam) else []
+    leave = f"{cam.leave_seconds:g}s" if cam.leave_seconds is not None else "default"
     action = _select(f"{cam.name}:", ["📸  Snapshot", "✏️   Edit source", *usb_actions,
+                                      f"🚶  Leave time — indoor/outdoor ({leave})",
                                       "⏯   Disable" if cam.enabled else "⏯   Enable", "🗑   Remove", BACK])
     if action is None or action == BACK:
         return
@@ -378,6 +380,9 @@ def camera_actions(engine: Engine, console: Console, cam: CameraConfig) -> None:
                 else:
                     console.print("[yellow]No frame yet — check the dashboard/log.[/]")
                 _pause()
+    elif "Leave time" in action:
+        if pick_leave_seconds(cfg, cam):
+            cfg.save()
     elif "Edit" in action:
         src = _text("New source:", default=cam.source)
         if src and src != cam.source:
@@ -392,6 +397,31 @@ def camera_actions(engine: Engine, console: Console, cam: CameraConfig) -> None:
         engine.stop_camera(cam.name)
         cfg.cameras.remove(cam)
         cfg.save()
+
+
+def pick_leave_seconds(cfg, cam: CameraConfig) -> bool:
+    """How long the people count must stay lower before someone has left. Returns True if changed."""
+    default = f"Default — events.leave_seconds ({cfg.events.leave_seconds:g}s)"
+    choice = _select("How long must someone be out of view before coming back counts as arriving again?", [
+        "Indoor — 60s (people sit, move around and step out briefly)",
+        "Outdoor — 10s (people walk past)",
+        default, "Custom …", BACK])
+    if choice is None or choice == BACK:
+        return False
+    if choice == default:
+        value = None
+    elif choice.startswith("Custom"):
+        raw = _text("Seconds:", default=f"{cam.leave_seconds or cfg.events.leave_seconds:g}")
+        try:
+            value = float(raw) if raw else None
+        except ValueError:
+            return False
+        if value is None:
+            return False
+    else:
+        value = 60.0 if choice.startswith("Indoor") else 10.0
+    changed, cam.leave_seconds = cam.leave_seconds != value, value
+    return changed
 
 
 # ---- people ---------------------------------------------------------------------------------
@@ -661,19 +691,18 @@ def telegram_menu(cfg: AppConfig, console: Console, engine: Engine | None = None
 SETTINGS = [
     ("detection", "confidence", "YOLO person confidence (0–1)"),
     ("detection", "detect_fps", "Inference rate per camera"),
-    ("detection", "min_hits", "Detections before a person counts"),
-    ("detection", "min_box_height", "Ignore people smaller than this fraction of frame height"),
-    ("detection", "overlap_confirm_seconds", "Box on top of a tracked person must last this long (s)"),
+    ("detection", "person_min_height", "People smaller than this fraction of frame height don't count"),
     ("face", "match_threshold", "Face match threshold (higher = stricter)"),
-    ("face", "trusted_min_matches", "Face matches needed before a trusted person suppresses alerts"),
+    ("face", "min_sightings", "Clear sightings a face needs during an event to count"),
+    ("face", "check_fps", "Face scans per second per camera"),
     ("face", "detector_score", "Face detector confidence"),
     ("face", "min_face_px", "Minimum face size in pixels"),
     ("face", "save_unknowns", "Save unknown faces for labeling"),
     ("face", "quality_min_sharpness", "Blurrier faces than this don't count (Laplacian variance)"),
     ("face", "quality_max_turn", "Faces turned further don't count (0 = straight on, 0.5 ≈ 45°)"),
     ("events", "cooldown_seconds", "No re-alert if the same person leaves and returns within (s)"),
-    ("events", "lost_memory_seconds", "Still person hidden up to this long isn't a new arrival (s)"),
-    ("events", "handoff_seconds", "Lost walker re-found nearby within this keeps their track (s)"),
+    ("events", "arrive_seconds", "People count must stay higher this long to be an arrival (s)"),
+    ("events", "leave_seconds", "...and lower this long before someone has left (s; per camera too)"),
     ("events", "post_seconds", "Clip seconds after detection (also the identification window)"),
     ("clip", "annotate", "Draw boxes and names on clips"),
     ("clip", "retention_days", "Delete saved clips after N days (0 = keep)"),
@@ -682,6 +711,7 @@ SETTINGS = [
     ("detection", "model", "YOLO model (restart needed)"),
     ("detection", "device", "Device auto/cuda:0/cpu (restart needed)"),
     ("face", "device", "Face model device auto/cuda/cpu (restart needed)"),
+    ("face", "detect_size", "Face detector input size; 960/1280 find farther faces but cost more"),
     ("events", "pre_seconds", "Clip seconds before detection (restart needed to increase)"),
     ("clip", "fps", "Clip FPS (restart needed)"),
     ("clip", "max_width", "Clip max width (restart needed)"),

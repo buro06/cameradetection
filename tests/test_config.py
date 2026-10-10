@@ -41,3 +41,24 @@ def test_legacy_sface_thresholds_are_reset_for_insightface(tmp_path):
     assert load_config(path).face.match_threshold == 0.35
     path.write_text("face:\n  model: buffalo_l\n  match_threshold: 0.4\n")
     assert load_config(path).face.match_threshold == 0.4  # already migrated: user's value stays
+
+
+def test_settings_of_the_old_tracker_are_dropped(tmp_path, caplog):
+    path = tmp_path / "config.yaml"
+    path.write_text("detection:\n  min_hits: 3\n  min_box_height: 0.1\n  overlap_confirm_seconds: 1.0\n  confidence: 0.6\n"
+                    "events:\n  track_ttl: 2.0\n  lost_memory_seconds: 30\n  handoff_seconds: 1.5\n  cooldown_seconds: 90\n"
+                    "face:\n  model: buffalo_l\n  trusted_min_matches: 3\n")
+    cfg = load_config(path)
+    assert (cfg.detection.confidence, cfg.events.cooldown_seconds, cfg.face.min_sightings) == (0.6, 90, 3)
+    assert "events.handoff_seconds" in caplog.text
+    cfg.save(path)
+    assert "min_hits" not in path.read_text() and load_config(path).to_dict() == cfg.to_dict()
+
+
+def test_camera_leave_time_round_trips(tmp_path):
+    cfg = AppConfig()
+    cfg.cameras = [CameraConfig(name="porch", source="rtsp://x", leave_seconds=10.0), CameraConfig(name="den", source="0")]
+    path = tmp_path / "config.yaml"
+    cfg.save(path)
+    loaded = load_config(path)
+    assert [c.leave_seconds for c in loaded.cameras] == [10.0, None]

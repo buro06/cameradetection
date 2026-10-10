@@ -28,7 +28,7 @@ MODEL_PACKS = {  # pack -> (zip URL, detector file, recognizer file)
     "buffalo_l": ("https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip",
                   "det_10g.onnx", "w600k_r50.onnx"),
 }
-DET_SIZES = (320, 480, 640)  # SCRFD input side: the smallest that fits the region (multiples of 32)
+DET_SIZES = (320, 480, 640)  # SCRFD input side: the smallest that fits the image, up to face.detect_size
 DET_NMS = 0.4
 ARCFACE_TEMPLATE = np.array([[38.2946, 51.6963], [73.5318, 51.5014], [56.0252, 71.7366],
                              [41.5493, 92.3655], [70.7299, 92.2041]], np.float32)  # 5 points in a 112x112 chip
@@ -190,7 +190,8 @@ class FaceEngine:
     def _detect(self, img: np.ndarray, min_score: float) -> tuple[np.ndarray, np.ndarray]:
         """Faces in `img`: (N, 5) boxes x1, y1, x2, y2, score and (N, 5, 2) landmarks, in image coords."""
         ih, iw = img.shape[:2]
-        side = next((s for s in DET_SIZES if max(ih, iw) <= s), DET_SIZES[-1])
+        largest = max(32, self.cfg.detect_size // 32 * 32)
+        side = next((s for s in (*(d for d in DET_SIZES if d < largest), largest) if max(ih, iw) <= s), largest)
         scale = side / max(ih, iw)
         nw, nh = max(1, round(iw * scale)), max(1, round(ih * scale))
         canvas = np.zeros((side, side, 3), np.uint8)
@@ -367,10 +368,11 @@ class FaceDB:
         return best_id, best
 
     # ---- matching -------------------------------------------------------------
-    def match(self, emb: np.ndarray) -> Match | None:
+    def match(self, emb: np.ndarray, min_score: float | None = None) -> Match | None:
+        """Closest known person scoring at least `min_score` (default: the match threshold)."""
         with self._lock:
             hit = self._best(self._known, self._known_ids, emb)
-            if hit is None or hit[1] < self.threshold:
+            if hit is None or hit[1] < (self.threshold if min_score is None else min_score):
                 return None
             name, trusted = self._persons[hit[0]]
             return Match(hit[0], name, trusted, hit[1])

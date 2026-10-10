@@ -11,31 +11,30 @@ detection:
   imgsz: 640
   detect_fps: 5.0         # inferences per second per camera
   half: false             # keep false on Maxwell GPUs (Quadro M4000): no fast FP16
-  min_hits: 2             # detections before a person is considered real (filters flickers)
-  min_box_height: 0.0     # ignore people smaller than this fraction of frame height (e.g. 0.1)
-  overlap_confirm_seconds: 1.0  # a box on top of someone already tracked must last this long to count
-                                # as another person (filters split-second duplicate boxes; 0 = off)
+  person_min_height: 0.15 # people smaller than this fraction of frame height don't count
+                          # (twice that if cut off at the frame edge, e.g. an arm poking in)
 
 face:
   model: buffalo_l        # InsightFace SCRFD + ArcFace (non-commercial weights); downloaded to data/models
   device: auto            # auto (GPU if onnxruntime can use it, else CPU) | cuda | cpu
   detector_score: 0.5     # SCRFD face confidence
   min_face_px: 40         # faces smaller than this are not recognised
-  check_fps: 2.0          # face checks per second per person while identifying them
+  check_fps: 2.0          # full-frame face scans per second per camera
+  detect_size: 640        # face detector input; 960 / 1280 find smaller (farther) faces but cost more
   match_threshold: 0.35   # ArcFace cosine similarity; raise to 0.4 for fewer false matches
   quality_min_sharpness: 25.0  # blurrier faces don't vote on who someone is
   quality_max_turn: 0.45  # nor do faces turned further away (0 = straight on, ~0.5 = 45°)
-  trusted_min_matches: 2  # consistent matches needed before a trusted face suppresses an alert
+  min_sightings: 2        # clear sightings a face needs during a clip to count (trusted or not)
   save_unknowns: true
   max_unknown_images: 5
 
 events:
-  pre_seconds: 0.0        # clip starts this long before the person was first detected (0 = at detection)
+  pre_seconds: 0.0        # clip starts this long before the person appeared (0 = when they appeared)
   post_seconds: 5.0       # ...and runs this long after; alerts are decided at the end of this window
-  cooldown_seconds: 60    # same person leaving and returning within this time doesn't re-alert (per camera)
-  track_ttl: 2.0
-  lost_memory_seconds: 30 # a still person hidden this long and reappearing in place isn't a new arrival
-  handoff_seconds: 1.5    # a walker lost and re-found nearby within this time keeps their track
+  cooldown_seconds: 60    # a face that alerted here doesn't re-alert if it comes back within this time
+  arrive_seconds: 2.0     # the people count must stay higher this long before someone has arrived
+  leave_seconds: 60       # ...and lower this long before someone has left (no re-alert for coming back
+                          # sooner); cameras can override it, e.g. 10 for an outdoor camera
 
 clip:
   fps: 15
@@ -55,6 +54,7 @@ telegram:
 cameras:
   - name: front-door
     source: "rtsp://user:password@192.168.1.20:554/Streaming/Channels/102"
+    leave_seconds: 10     # outdoors: people walk past, each passer-by is a new arrival
   - name: desk
     source: "0"           # USB webcam index
     backend: auto         # Windows: dshow (default) or msmf

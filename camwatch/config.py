@@ -30,6 +30,9 @@ class CameraConfig:
     # USB pixel format: auto (MJPG on Windows) | MJPG | YUY2 | none
     fourcc: str = "auto"
     snapshot_fps: float = 2.0
+    # people count must stay lower this long before someone counts as gone (blank = events.leave_seconds);
+    # short (~10) suits an outdoor camera people walk past, long suits a living room
+    leave_seconds: float | None = None
 
 
 @dataclass
@@ -40,10 +43,8 @@ class DetectionConfig:
     imgsz: int = 640
     detect_fps: float = 5.0  # inference rate per camera
     half: bool = False  # Maxwell GPUs (e.g. Quadro M4000) have no fast FP16
-    min_hits: int = 2  # detections needed before a track counts as a real person
-    min_box_height: float = 0.0  # ignore people smaller than this fraction of frame height
-    # a box on top of someone already tracked must persist this long to count (filters duplicate boxes)
-    overlap_confirm_seconds: float = 1.0
+    # people smaller than this fraction of frame height don't count (twice that if cut off at the frame edge)
+    person_min_height: float = 0.15
 
 
 @dataclass
@@ -52,25 +53,25 @@ class FaceConfig:
     device: str = "auto"  # auto (GPU if onnxruntime can use it) | cuda | cpu
     detector_score: float = 0.5  # SCRFD face confidence
     min_face_px: int = 40
-    check_fps: float = 2.0  # face checks per second per person while identifying them (each costs GPU/CPU time)
+    check_fps: float = 2.0  # full-frame face scans per second per camera (each costs GPU/CPU time)
+    detect_size: int = 640  # face detector input size; 960 or 1280 finds smaller (farther) faces but costs more
     match_threshold: float = 0.35  # ArcFace cosine similarity; raise for fewer false matches
     # Blurry or turned-away faces don't vote on who someone is, and aren't saved or enrolled.
     quality_min_sharpness: float = 25.0  # detail left in the aligned face (Laplacian variance); lower = blurrier
     quality_max_turn: float = 0.45  # how far the face is turned from the camera (0 = straight on, ~0.5 = 45°)
-    trusted_min_matches: int = 2  # face matches needed before a trusted person suppresses alerts
+    min_sightings: int = 2  # clear sightings a face needs during an event to count (trusted or not)
     save_unknowns: bool = True
     max_unknown_images: int = 5  # face crops kept per unknown cluster
 
 
 @dataclass
 class EventConfig:
-    pre_seconds: float = 0.0  # clip starts this long before the person was first detected
+    pre_seconds: float = 0.0  # clip starts this long before someone arrived
     post_seconds: float = 5.0  # ...and runs this long after (identification continues meanwhile)
-    cooldown_seconds: float = 60.0  # same person leaving and coming back within this time doesn't re-alert
-    track_ttl: float = 2.0  # seconds a track survives without detections
-    lost_memory_seconds: float = 30.0  # a still person hidden this long and reappearing in place isn't "new"
-    # a moving person lost and re-found nearby within this time keeps their track (walking across the room)
-    handoff_seconds: float = 1.5
+    cooldown_seconds: float = 60.0  # a face unseen for less than this isn't a new arrival (no re-alert)
+    arrive_seconds: float = 2.0  # the people count must stay higher this long before someone has arrived
+    # ...and lower this long before someone has left (cameras can override; see cameras[].leave_seconds)
+    leave_seconds: float = 60.0
 
 
 @dataclass
@@ -223,11 +224,35 @@ def _migrate_face(face: dict | None) -> dict | None:
     return {k: v for k, v in face.items() if k not in LEGACY_FACE_KEYS}
 
 
+# settings of the per-person tracker that people counting replaced; saved configs still contain them
+REMOVED_KEYS = {
+    "detection": ("min_hits", "min_box_height", "overlap_confirm_seconds"),
+    "events": ("track_ttl", "lost_memory_seconds", "handoff_seconds"),
+    "face": ("trusted_min_matches",),
+}
+
+
+def _drop_removed(raw: dict[str, Any]) -> None:
+    dropped = []
+    face = raw.get("face") or {}
+    if "trusted_min_matches" in face and "min_sightings" not in face:
+        face["min_sightings"] = face["trusted_min_matches"]
+    for section, keys in REMOVED_KEYS.items():
+        sec = raw.get(section) or {}
+        for k in keys:
+            if k in sec:
+                del sec[k]
+                dropped.append(f"{section}.{k}")
+    if dropped:
+        log.warning("Ignoring settings that no longer exist (they are removed on the next save): %s", ", ".join(dropped))
+
+
 def load_config(path: Path | str = DEFAULT_CONFIG_PATH) -> AppConfig:
     path = Path(path)
     raw: dict[str, Any] = {}
     if path.exists():
         raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    _drop_removed(raw)
     cfg = AppConfig(
         data_dir=raw.get("data_dir", "data"),
         rtsp_transport=raw.get("rtsp_transport", "tcp"),

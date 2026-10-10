@@ -62,10 +62,10 @@ def describe_source(source: str) -> str:
 
 @dataclass
 class Overlay:
-    """Tracked person boxes (full-res coords) at a point in time, drawn onto clip frames."""
+    """Person and face boxes (full-res coords) at a point in time, drawn onto clip frames."""
 
     ts: float
-    boxes: list[tuple[int, tuple[float, float, float, float]]]  # (track_id, xyxy)
+    boxes: list[tuple[int, tuple[float, float, float, float]]]  # (label id, xyxy); see events.PERSON_BOX_ID
 
 
 @dataclass
