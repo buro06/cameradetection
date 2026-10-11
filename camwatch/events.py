@@ -1,23 +1,20 @@
 """Per-camera arrivals, face identification, event lifecycle and alert decisions.
 
-Alerts are about *arrivals*, not presence. Nothing follows individual bodies from frame to frame, so walking
-around, sitting down, turning away or a missed detection can't turn one person into two. Two signals:
+Three rules, all on one time span, `events.away_seconds` (30 s):
 
-  * People count (YOLO). Only solid person boxes count: tall enough, and not a sliver cut off at the frame
-    edge. A stable `level` rises once more people have been in view for `arrive_seconds`, and falls only
-    once fewer have been for `leave_seconds`. Each rise is an arrival. While the room stays occupied
-    (an activity session) nobody re-alerts; an outdoor camera with a short `leave_seconds` makes every
-    passer-by a short session of their own.
-  * Faces (SCRFD + ArcFace) on the whole frame. Every clear face is identified wherever it is: a known
-    person, or grouped with similar unknown faces seen on this camera. Blurry or turned-away faces are ignored.
+  * People (YOLO). A camera is empty once it has seen no person for `away_seconds`. Someone appearing in an
+    empty camera (in most detections for `arrive_seconds`) is an arrival. Only solid boxes count: tall enough,
+    and not a sliver cut off at the frame edge.
+  * Faces (SCRFD + ArcFace), looked for only inside person boxes. Each clear face is identified: a known person,
+    or grouped with similar unknown faces seen on this camera. A face is new if this camera hasn't seen it for
+    `away_seconds` and not at all since the camera was last empty (someone who never left the room but kept
+    their face turned away isn't new). Blurry or turned-away faces are ignored.
+  * An arrival or a new face starts an event: a `post_seconds` clip while faces keep being identified. Faces seen
+    at least `min_sightings` times are the people in it; if someone arrived and no face was clear enough, they
+    are "Person (face not visible)". No alert if every new person is trusted.
 
-Event lifecycle:
-  1. Starts on an arrival, or when a face shows up that this camera hasn't seen within `cooldown_seconds`.
-  2. Records for `post_seconds` while faces keep being identified.
-  3. Finalizes: faces seen at least `min_sightings` times are the people in it. Arrivals no newly seen face
-     accounts for become "Person (face not visible)" (mask, hood, dark room, back turned).
-  4. Decides: no alert if every new person is trusted, otherwise alert unless each of them already alerted
-     on this camera within the cooldown.
+So someone stepping out and back within `away_seconds` never re-alerts, and sitting, turning away or walking
+around can't make one person into two: nothing follows bodies from frame to frame.
 """
 
 from __future__ import annotations
@@ -38,38 +35,34 @@ from .faces import FaceDB, FaceEngine, FaceObs
 log = logging.getLogger(__name__)
 
 EDGE_MARGIN = 0.02  # a box this close (fraction of frame size) to the left/right/bottom edge is cut off
-DUPLICATE_CONTAINMENT = 0.8  # a box this much inside a bigger one is the same person boxed twice
-ARRIVE_SHARE = 0.8  # share of detections during `arrive_seconds` that must show the higher count
+ARRIVE_SHARE = 0.8  # share of detections during `arrive_seconds` that must show someone
 MAX_FACES = 6
+MAX_FACE_REGIONS = 4  # more person boxes than this: one full-frame face scan is cheaper than one per box
+CROP_DET_SIZE = 320  # face detector input for one person's box (a face is ~1/7 of a body: still plenty)
+SAME_FACE_IOU = 0.5  # one face found through two overlapping person boxes
 FACE_MEMORY = 10  # embeddings kept per face seen on this camera
-SIGHTING_MEMORY = 64  # sighting times kept per face (to tell whether it was here just before an event)
-SOFT_MARGIN = 0.08  # a face this far below the match threshold still counts as someone already here
-RECENT_FACE_SECONDS = 10.0  # a face seen this recently before an event was already here: it explains no arrival
 VISIBLE_SECONDS = 2.0  # dashboard "in view" shows faces seen this recently
 PERSON_BOX_ID, UNCLEAR_FACE_ID = 0, -1  # overlay ids of person boxes and unidentifiable faces (faces use 1, 2, ...)
 PERSON_LABEL, UNCLEAR_LABEL, FACE_LABEL = "person", "unclear face", "face"
 
 
-def _containment(a: np.ndarray, b: np.ndarray) -> float:
-    """Share of box a's area inside box b."""
+def solid_people(dets: np.ndarray, width: int, height: int, min_height: float) -> list[np.ndarray]:
+    """Person boxes that count: tall enough, or twice that if cut off at the frame edge."""
+    mx, my = EDGE_MARGIN * width, EDGE_MARGIN * height
+    out = []
+    for b in dets[:, :4]:
+        cut = b[0] <= mx or b[2] >= width - mx or b[3] >= height - my
+        if b[3] - b[1] >= min_height * height * (2 if cut else 1):
+            out.append(b)
+    return out
+
+
+def _iou(a, b) -> float:
     ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
     iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
-    area = max(1e-6, (a[2] - a[0]) * (a[3] - a[1]))
-    return ix * iy / area
-
-
-def solid_people(dets: np.ndarray, width: int, height: int, min_height: float) -> list[np.ndarray]:
-    """Person boxes that count: tall enough (twice as tall if cut off at the frame edge), one per person."""
-    out: list[np.ndarray] = []
-    mx, my = EDGE_MARGIN * width, EDGE_MARGIN * height
-    for b in sorted(dets[:, :4], key=lambda b: -(b[2] - b[0]) * (b[3] - b[1])):
-        cut = b[0] <= mx or b[2] >= width - mx or b[3] >= height - my
-        if b[3] - b[1] < min_height * height * (2 if cut else 1):
-            continue
-        if any(_containment(b, o) >= DUPLICATE_CONTAINMENT for o in out):
-            continue
-        out.append(b)
-    return out
+    inter = ix * iy
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / union if union > 0 else 0.0
 
 
 @dataclass
@@ -79,16 +72,12 @@ class SeenFace:
     id: int
     name: str | None
     last_seen: float
+    visit: float = float("-inf")  # when this visit began (first sighting after `away_seconds` unseen)
     embeddings: deque = field(default_factory=lambda: deque(maxlen=FACE_MEMORY))
-    times: deque = field(default_factory=lambda: deque(maxlen=SIGHTING_MEMORY))
     unknown_id: int | None = None  # stranger's cluster in the face DB, once recorded
 
     def similarity(self, emb: np.ndarray) -> float:
         return max(float(e @ emb) for e in self.embeddings)
-
-    def seen_before(self, t: float) -> float:
-        """Last sighting before time t (-inf: none)."""
-        return max((s for s in self.times if s < t - 1e-6), default=float("-inf"))
 
 
 @dataclass
@@ -109,7 +98,7 @@ class PersonInfo:
     key: str
     unknown_id: int | None
     face: FaceObs | None
-    new: bool = True  # arrived / newly identified in this event (vs. already present)
+    new: bool = True  # arrived in this event (vs. already here)
     score: float | None = None  # mean face-match similarity for `name`
     track_ids: tuple[int, ...] = ()  # every face id merged into this person (same name / unknown cluster)
 
@@ -133,7 +122,7 @@ class PersonInfo:
 class EventResult:
     camera: str
     wall_time: float
-    decision: str  # alert | rate-limited | trusted | cooldown | disarmed | unchanged
+    decision: str  # alert | rate-limited | trusted | disarmed | unchanged
     people: list[PersonInfo]
     frames: list[BufferedFrame]
     start: float
@@ -157,8 +146,7 @@ class _Event:
     anchor: float
     wall: float
     recording: Recording
-    session: float  # when the activity session this event belongs to began
-    arrivals: int = 0
+    arrival: bool = False  # someone appeared in the empty camera
     faces: dict[int, _Sightings] = field(default_factory=dict)
 
 
@@ -170,17 +158,15 @@ class CameraMonitor:
         self.faces = faces
         self.db = db
         self.is_armed = is_armed
-        self.level = 0  # people in view, smoothed
-        self.session: float | None = None  # start of the current activity session (someone in view)
-        self._last_face = float("-inf")
-        self._counts: deque[tuple[float, int]] = deque()
+        self.occupied_since: float | None = None  # when someone appeared in the empty camera (None: empty)
+        self.last_person = float("-inf")  # last detection with a person in it
+        self._hits: deque[tuple[float, bool]] = deque()  # (time, person seen) for the arrival window
         self.seen: dict[int, SeenFace] = {}
         self._ids = itertools.count(1)
         self._face_boxes: list[tuple[int, tuple[float, float, float, float]]] = []
         self._last_face_scan = float("-inf")
         self._faceless = itertools.count(1)
         self.event: _Event | None = None
-        self.cooldowns: dict[str, float] = {}
         self.visible: list[str] = []
         self.last_result: EventResult | None = None
         self.infer_fps = 0.0
@@ -189,10 +175,6 @@ class CameraMonitor:
     @property
     def name(self) -> str:
         return self.stream.cfg.name
-
-    def leave_seconds(self) -> float:
-        own = self.stream.cfg.leave_seconds
-        return self.cfg.events.leave_seconds if own is None else own
 
     # ---- per inference --------------------------------------------------------------------
     def process(self, frame: np.ndarray, dets: np.ndarray, now: float) -> None:
@@ -204,96 +186,88 @@ class CameraMonitor:
 
         h, w = frame.shape[:2]
         people = solid_people(dets, w, h, self.cfg.detection.person_min_height)
-        arrived, since = self._count(len(people), now)
+        arrived = self._update_presence(bool(people), now)
 
         sightings, new_faces = [], []
-        if now - self._last_face_scan >= 1.0 / max(self.cfg.face.check_fps, 0.1) - 1e-6:
+        if not len(dets):
+            self._face_boxes = []
+        elif now - self._last_face_scan >= 1.0 / max(self.cfg.face.check_fps, 0.1) - 1e-6:
             self._last_face_scan = now
-            sightings, new_faces = self._scan_faces(frame, now)
-        self._update_session(since if arrived else now, now, bool(sightings))
+            sightings, new_faces = self._scan_faces(frame, dets[:, :4], now)
 
-        if self.event is None and (arrived or new_faces):
-            anchor = since if arrived else now
+        if self.event is None and (arrived is not None or new_faces):
+            anchor = now if arrived is None else arrived
             start = anchor - self.cfg.events.pre_seconds
             self.event = _Event(start=start, anchor=anchor, end=anchor + self.cfg.events.post_seconds,
-                                wall=time.time() - (now - anchor), recording=self.stream.start_recording(start),
-                                session=self.session)
-            log.debug("[%s] event started (arrivals %d, new faces %s)", self.name, arrived, new_faces)
+                                wall=time.time() - (now - anchor), recording=self.stream.start_recording(start))
+            log.debug("[%s] event started (arrival: %s, new faces: %s)", self.name, arrived is not None, new_faces)
         if self.event is not None:
-            self.event.arrivals += arrived
+            self.event.arrival |= arrived is not None
             for s in sightings:
                 ev_s = self.event.faces.setdefault(s.face.id, _Sightings(s.face))
                 ev_s.count += s.count
                 ev_s.scores += s.scores
                 if s.best is not None and (ev_s.best is None or s.best.quality > ev_s.best.quality):
                     ev_s.best = s.best
+        self._forget(now)
 
         self.stream.set_overlay(Overlay(now, [(PERSON_BOX_ID, tuple(float(v) for v in b)) for b in people]
                                         + self._face_boxes))
         trusted_map = self.db.trusted_map()
         labels = [f"{f.name}{' ✓' if trusted_map.get(f.name) else ''}" if f.name else "unknown"
                   for f in self.seen.values() if now - f.last_seen <= VISIBLE_SECONDS]
-        self.visible = ([f"{self.level} {'person' if self.level == 1 else 'people'}"] if self.level else []) + labels
+        self.visible = ([f"{len(people)} {'person' if len(people) == 1 else 'people'}"] if people else []) + labels
 
-    def _update_session(self, began: float, now: float, faces: bool) -> None:
-        """A session lasts while anyone is in view; it ends once nobody was for `leave_seconds`."""
-        if faces:
-            self._last_face = now
-        if self.level > 0 or faces:
-            if self.session is None:
-                self.session = began
-                log.debug("[%s] activity session started", self.name)
-        elif self.session is not None and now - self._last_face > self.leave_seconds() and self.event is None:
-            self.session = None
-            log.debug("[%s] activity session ended", self.name)
-
-    def _is_new(self, f: SeenFace, t: float) -> bool:
-        """Not seen earlier in this activity session, nor within the cooldown before it."""
-        before = f.seen_before(t)
-        return (self.session is None or before < self.session) and t - before > self.cfg.events.cooldown_seconds
-
-    def _count(self, n: int, now: float) -> tuple[int, float]:
-        """Update the smoothed people count; returns (people who just arrived, when they appeared)."""
-        arrive, leave = self.cfg.events.arrive_seconds, self.leave_seconds()
-        if self._counts and now - self._counts[-1][0] > leave:  # camera was offline: start over
-            self._counts.clear()
-            self.level = 0
-        self._counts.append((now, n))
-        while self._counts and self._counts[0][0] < now - max(arrive, leave) - 1.0:
-            self._counts.popleft()
+    def _update_presence(self, person: bool, now: float) -> float | None:
+        """Track whether anyone is here. Returns when someone appeared in the empty camera, else None."""
+        away, arrive = self.cfg.events.away_seconds, self.cfg.events.arrive_seconds
+        if self.occupied_since is not None and now - self.last_person > away:  # also after a camera outage
+            self.occupied_since = None
+            log.debug("[%s] nobody here for %gs", self.name, away)
+        if person:
+            self.last_person = now
+        self._hits.append((now, person))
+        while self._hits[0][0] < now - arrive - 1.0:
+            self._hits.popleft()
+        if self.occupied_since is not None:
+            return None
         frame = 1.0 / max(self.cfg.detection.detect_fps, 0.1)
-        oldest = self._counts[0][0]
+        if now - self._hits[0][0] < arrive - frame / 2:  # not enough history to judge yet
+            return None
+        window = [(ts, p) for ts, p in self._hits if ts >= now - arrive]
+        if sum(p for _, p in window) < ARRIVE_SHARE * len(window):
+            return None
+        self.occupied_since = next(ts for ts, p in window if p)
+        log.debug("[%s] someone arrived", self.name)
+        return self.occupied_since
 
-        recent = sorted(c for ts, c in self._counts if ts >= now - arrive)
-        if now - oldest >= arrive - frame / 2:  # enough history to judge
-            k = recent[int((1 - ARRIVE_SHARE) * len(recent))]  # count shown in >= ARRIVE_SHARE of detections
-            if k > self.level:
-                arrived, self.level = k - self.level, k
-                since = next(ts for ts, c in self._counts if ts >= now - arrive and c >= k)
-                log.debug("[%s] people in view: %d (+%d)", self.name, k, arrived)
-                return arrived, since
-        if now - oldest >= leave - frame / 2:
-            most = max(c for ts, c in self._counts if ts >= now - leave)
-            if most < self.level:
-                log.debug("[%s] people in view: %d (-%d)", self.name, most, self.level - most)
-                self.level = most
-        return 0, now
+    def _scan_faces(self, frame: np.ndarray, boxes: np.ndarray, now: float) -> tuple[list[_Sightings], list[int]]:
+        """Identify the faces inside the person boxes. Returns the sightings, and ids of faces that are new here."""
+        if len(boxes) > MAX_FACE_REGIONS:
+            found = self.faces.analyze(frame, None, max_faces=MAX_FACES)
+        else:
+            found = []
+            for b in boxes:
+                for obs in self.faces.analyze(frame, tuple(float(v) for v in b), max_faces=2, det_size=CROP_DET_SIZE):
+                    same = next((i for i, o in enumerate(found) if _iou(o.box, obs.box) >= SAME_FACE_IOU), None)
+                    if same is None:
+                        found.append(obs)
+                    elif obs.score > found[same].score:
+                        found[same] = obs
 
-    def _scan_faces(self, frame: np.ndarray, now: float) -> tuple[list[_Sightings], list[int]]:
-        """Identify every face in the frame. Returns the sightings, and ids of faces that are new here
-        (not seen earlier in this activity session, nor within the cooldown)."""
         self._face_boxes, newly = [], []
         sightings: dict[int, _Sightings] = {}
-        for obs in self.faces.analyze(frame, None, max_faces=MAX_FACES):
+        for obs in found:
             if not obs.good:  # blurry / turned away: can't tell who it is either way
                 self._face_boxes.append((UNCLEAR_FACE_ID, obs.box))
                 continue
-            f, score = self._identify(obs.embedding, now)
+            f, score = self._identify(obs.embedding)
             if f.id not in sightings:  # (the same person twice in one frame is a duplicate detection)
-                f.last_seen = now
-                f.times.append(now)
-                if self._is_new(f, now):
+                stayed = self.occupied_since is not None and f.last_seen >= self.occupied_since
+                if now - f.last_seen > self.cfg.events.away_seconds and not stayed:
+                    f.visit = now
                     newly.append(f.id)
+                f.last_seen = now
             f.embeddings.append(obs.embedding)
             s = sightings.setdefault(f.id, _Sightings(f))
             s.count = 1
@@ -302,18 +276,11 @@ class CameraMonitor:
             if s.best is None or obs.quality > s.best.quality:
                 s.best = obs
             self._face_boxes.append((f.id, obs.box))
-        self._forget(now)
         return list(sightings.values()), newly
 
-    def _identify(self, emb: np.ndarray, now: float) -> tuple[SeenFace, float | None]:
+    def _identify(self, emb: np.ndarray) -> tuple[SeenFace, float | None]:
         """Known person, else a stranger already seen here, else someone new. Returns the face and match score."""
         m = self.db.match(emb)
-        if m is None:
-            # a household member at a bad angle just under the threshold, while they're known to be here
-            near = self.db.match(emb, self.db.threshold - SOFT_MARGIN)
-            if near is not None and any(f.name == near.name and now - f.last_seen <= self.cfg.events.cooldown_seconds
-                                        for f in self.seen.values()):
-                m = near
         if m is not None:
             f = next((f for f in self.seen.values() if f.name == m.name), None)
             return f or self._new_face(m.name), m.score
@@ -329,11 +296,11 @@ class CameraMonitor:
         return f
 
     def _forget(self, now: float) -> None:
-        keep = 2 * max(self.cfg.events.cooldown_seconds, self.leave_seconds(), RECENT_FACE_SECONDS)
+        keep = 2 * self.cfg.events.away_seconds
         in_event = set(self.event.faces) if self.event else set()
         for fid, f in list(self.seen.items()):
-            in_session = self.session is not None and f.last_seen >= self.session  # still here, maybe turned away
-            if now - f.last_seen > keep and fid not in in_event and not in_session:
+            stayed = self.occupied_since is not None and f.last_seen >= self.occupied_since  # maybe turned away
+            if now - f.last_seen > keep and fid not in in_event and not stayed:
                 del self.seen[fid]
 
     # ---- events --------------------------------------------------------------------------
@@ -354,12 +321,11 @@ class CameraMonitor:
         return labels
 
     def _finalize(self, ev: _Event, now: float) -> EventResult | None:
-        face_cfg, cooldown = self.cfg.face, self.cfg.events.cooldown_seconds
+        face_cfg = self.cfg.face
         trusted_map = self.db.trusted_map()
         box_labels = {PERSON_BOX_ID: PERSON_LABEL, UNCLEAR_FACE_ID: UNCLEAR_LABEL}
         people: list[PersonInfo] = []
         by_key: dict[str, PersonInfo] = {}
-        explained = 0
         for s in ev.faces.values():
             f = s.face
             if s.count < face_cfg.min_sightings:  # a fleeting face: too little to go on
@@ -370,10 +336,7 @@ class CameraMonitor:
                     f.unknown_id = self.db.record_unknown(s.best.embedding, s.best.crop, s.best.quality, self.name,
                                                           face_cfg.max_unknown_images)
             key = f"person:{f.name}" if f.name else (f"unknown:{f.unknown_id}" if f.unknown_id else f"face:{self.name}:{f.id}")
-            before = f.seen_before(ev.anchor)
-            if ev.anchor - before > RECENT_FACE_SECONDS:
-                explained += 1  # wasn't here just before: this face can be (one of) the arrivals
-            new = before < ev.session and ev.anchor - before > cooldown
+            new = f.visit >= ev.start - 1e-6  # this visit began with this event, not before it
             score = float(np.mean(s.scores)) if s.scores else None
             p = PersonInfo(f.id, f.name, bool(f.name and trusted_map.get(f.name)), key,
                            None if f.name else f.unknown_id, s.best, new, score, track_ids=(f.id,))
@@ -386,11 +349,11 @@ class CameraMonitor:
                 same.track_ids += p.track_ids
                 if p.face is not None and (same.face is None or p.face.quality > same.face.quality):
                     same.face = p.face
-        for _ in range(max(0, ev.arrivals - explained)):  # arrivals whose face was never seen clearly
+        if ev.arrival and not people:  # someone came, but no face was clear enough to say who
             people.append(PersonInfo(PERSON_BOX_ID, None, False, f"faceless:{self.name}:{next(self._faceless)}",
                                      None, None, True))
         if not people:
-            log.debug("[%s] event dropped: no face seen clearly enough and nobody arrived", self.name)
+            log.debug("[%s] event dropped: no face seen clearly enough", self.name)
             return None
 
         # Only people who are new in this event can cause an alert; the others are listed as context.
@@ -401,12 +364,8 @@ class CameraMonitor:
             decision = "trusted"
         elif not self.is_armed(self.name):
             decision = "disarmed"
-        elif all(now - self.cooldowns.get(p.key, -1e9) < cooldown for p in new_untrusted):
-            decision = "cooldown"  # same identities left and came back within the cooldown
         else:
             decision = "alert"
-            for p in new_untrusted:
-                self.cooldowns[p.key] = now
 
         result = EventResult(self.name, ev.wall, decision, people, ev.recording.frames, ev.start, ev.end, ev.anchor,
                              box_labels)

@@ -46,19 +46,21 @@ def test_legacy_sface_thresholds_are_reset_for_insightface(tmp_path):
 def test_settings_of_the_old_tracker_are_dropped(tmp_path, caplog):
     path = tmp_path / "config.yaml"
     path.write_text("detection:\n  min_hits: 3\n  min_box_height: 0.1\n  overlap_confirm_seconds: 1.0\n  confidence: 0.6\n"
-                    "events:\n  track_ttl: 2.0\n  lost_memory_seconds: 30\n  handoff_seconds: 1.5\n  cooldown_seconds: 90\n"
+                    "events:\n  track_ttl: 2.0\n  lost_memory_seconds: 30\n  handoff_seconds: 1.5\n  post_seconds: 4\n"
                     "face:\n  model: buffalo_l\n  trusted_min_matches: 3\n")
     cfg = load_config(path)
-    assert (cfg.detection.confidence, cfg.events.cooldown_seconds, cfg.face.min_sightings) == (0.6, 90, 3)
+    assert (cfg.detection.confidence, cfg.events.post_seconds, cfg.face.min_sightings) == (0.6, 4, 3)
     assert "events.handoff_seconds" in caplog.text
     cfg.save(path)
     assert "min_hits" not in path.read_text() and load_config(path).to_dict() == cfg.to_dict()
 
 
-def test_camera_leave_time_round_trips(tmp_path):
-    cfg = AppConfig()
-    cfg.cameras = [CameraConfig(name="porch", source="rtsp://x", leave_seconds=10.0), CameraConfig(name="den", source="0")]
+def test_cooldown_and_leave_times_become_the_30s_away_rule(tmp_path, caplog):
     path = tmp_path / "config.yaml"
+    path.write_text("events:\n  cooldown_seconds: 60\n  leave_seconds: 60\n"
+                    "cameras:\n  - name: porch\n    source: rtsp://x\n    leave_seconds: 10\n  - name: den\n    source: '0'\n")
+    cfg = load_config(path)
+    assert cfg.events.away_seconds == 30 and [c.name for c in cfg.cameras] == ["porch", "den"]
+    assert "events.cooldown_seconds" in caplog.text and "cameras.leave_seconds" in caplog.text
     cfg.save(path)
-    loaded = load_config(path)
-    assert [c.leave_seconds for c in loaded.cameras] == [10.0, None]
+    assert "leave_seconds" not in path.read_text() and load_config(path).to_dict() == cfg.to_dict()

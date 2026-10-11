@@ -18,7 +18,7 @@ from .engine import Engine
 from .liveview import LiveView
 from .timefmt import clock
 
-DECISION_STYLE = {"alert": "bold red", "rate-limited": "red", "trusted": "green", "cooldown": "yellow",
+DECISION_STYLE = {"alert": "bold red", "rate-limited": "red", "trusted": "green",
                   "disarmed": "dim", "unchanged": "dim"}
 
 

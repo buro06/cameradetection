@@ -19,8 +19,8 @@ face:
   device: auto            # auto (GPU if onnxruntime can use it, else CPU) | cuda | cpu
   detector_score: 0.5     # SCRFD face confidence
   min_face_px: 40         # faces smaller than this are not recognised
-  check_fps: 2.0          # full-frame face scans per second per camera
-  detect_size: 640        # face detector input; 960 / 1280 find smaller (farther) faces but cost more
+  check_fps: 2.0          # face scans per second per camera, inside person boxes, only while someone is in view
+  detect_size: 640        # face detector input for whole-frame scans (5+ people, enrollment)
   match_threshold: 0.35   # ArcFace cosine similarity; raise to 0.4 for fewer false matches
   quality_min_sharpness: 25.0  # blurrier faces don't vote on who someone is
   quality_max_turn: 0.45  # nor do faces turned further away (0 = straight on, ~0.5 = 45°)
@@ -31,10 +31,8 @@ face:
 events:
   pre_seconds: 0.0        # clip starts this long before the person appeared (0 = when they appeared)
   post_seconds: 5.0       # ...and runs this long after; alerts are decided at the end of this window
-  cooldown_seconds: 60    # a face that alerted here doesn't re-alert if it comes back within this time
-  arrive_seconds: 2.0     # the people count must stay higher this long before someone has arrived
-  leave_seconds: 60       # ...and lower this long before someone has left (no re-alert for coming back
-                          # sooner); cameras can override it, e.g. 10 for an outdoor camera
+  away_seconds: 30        # someone must be gone this long before coming back alerts again
+  arrive_seconds: 2.0     # someone must be in view this long in an empty camera to count as arrived
 
 clip:
   fps: 15
@@ -54,7 +52,6 @@ telegram:
 cameras:
   - name: front-door
     source: "rtsp://user:password@192.168.1.20:554/Streaming/Channels/102"
-    leave_seconds: 10     # outdoors: people walk past, each passer-by is a new arrival
   - name: desk
     source: "0"           # USB webcam index
     backend: auto         # Windows: dshow (default) or msmf

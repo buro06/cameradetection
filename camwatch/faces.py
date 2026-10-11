@@ -187,10 +187,11 @@ class FaceEngine:
             self._anchors[key] = np.repeat(c, 2, axis=0)  # 2 anchors per position
         return self._anchors[key]
 
-    def _detect(self, img: np.ndarray, min_score: float) -> tuple[np.ndarray, np.ndarray]:
-        """Faces in `img`: (N, 5) boxes x1, y1, x2, y2, score and (N, 5, 2) landmarks, in image coords."""
+    def _detect(self, img: np.ndarray, min_score: float, det_size: int | None = None) -> tuple[np.ndarray, np.ndarray]:
+        """Faces in `img`: (N, 5) boxes x1, y1, x2, y2, score and (N, 5, 2) landmarks, in image coords.
+        The detector input is at most `det_size` (default `face.detect_size`) pixels on its long side."""
         ih, iw = img.shape[:2]
-        largest = max(32, self.cfg.detect_size // 32 * 32)
+        largest = max(32, (det_size or self.cfg.detect_size) // 32 * 32)
         side = next((s for s in (*(d for d in DET_SIZES if d < largest), largest) if max(ih, iw) <= s), largest)
         scale = side / max(ih, iw)
         nw, nh = max(1, round(iw * scale)), max(1, round(ih * scale))
@@ -225,8 +226,9 @@ class FaceEngine:
         return emb / (np.linalg.norm(emb) + 1e-9)
 
     def analyze(self, frame: np.ndarray, region: tuple[float, float, float, float] | None = None,
-                max_faces: int = 1, min_score: float | None = None) -> list[FaceObs]:
-        """Find faces in `frame` (optionally only inside region xyxy) and embed them, best first."""
+                max_faces: int = 1, min_score: float | None = None, det_size: int | None = None) -> list[FaceObs]:
+        """Find faces in `frame` (optionally only inside region xyxy) and embed them, best first.
+        `det_size` caps the face detector's input (smaller is faster; see `_detect`)."""
         fh, fw = frame.shape[:2]
         if region is None:
             x0, y0, x1, y1 = 0, 0, fw, fh
@@ -243,7 +245,7 @@ class FaceEngine:
         min_score = self.cfg.detector_score if min_score is None else min_score
 
         with self._lock:
-            boxes, kpss = self._detect(crop, min_score)
+            boxes, kpss = self._detect(crop, min_score, det_size)
             widths = boxes[:, 2] - boxes[:, 0]
             order = [i for i in np.argsort(-boxes[:, 4] * widths) if widths[i] >= self.cfg.min_face_px][:max_faces]
             out = []

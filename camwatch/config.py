@@ -30,9 +30,6 @@ class CameraConfig:
     # USB pixel format: auto (MJPG on Windows) | MJPG | YUY2 | none
     fourcc: str = "auto"
     snapshot_fps: float = 2.0
-    # people count must stay lower this long before someone counts as gone (blank = events.leave_seconds);
-    # short (~10) suits an outdoor camera people walk past, long suits a living room
-    leave_seconds: float | None = None
 
 
 @dataclass
@@ -53,8 +50,9 @@ class FaceConfig:
     device: str = "auto"  # auto (GPU if onnxruntime can use it) | cuda | cpu
     detector_score: float = 0.5  # SCRFD face confidence
     min_face_px: int = 40
-    check_fps: float = 2.0  # full-frame face scans per second per camera (each costs GPU/CPU time)
-    detect_size: int = 640  # face detector input size; 960 or 1280 finds smaller (farther) faces but costs more
+    check_fps: float = 2.0  # face scans per second per camera, inside person boxes, only while someone is in view
+    # face detector input for whole-frame scans (5+ people, enrollment); 960/1280 find farther faces, cost more
+    detect_size: int = 640
     match_threshold: float = 0.35  # ArcFace cosine similarity; raise for fewer false matches
     # Blurry or turned-away faces don't vote on who someone is, and aren't saved or enrolled.
     quality_min_sharpness: float = 25.0  # detail left in the aligned face (Laplacian variance); lower = blurrier
@@ -68,10 +66,10 @@ class FaceConfig:
 class EventConfig:
     pre_seconds: float = 0.0  # clip starts this long before someone arrived
     post_seconds: float = 5.0  # ...and runs this long after (identification continues meanwhile)
-    cooldown_seconds: float = 60.0  # a face unseen for less than this isn't a new arrival (no re-alert)
-    arrive_seconds: float = 2.0  # the people count must stay higher this long before someone has arrived
-    # ...and lower this long before someone has left (cameras can override; see cameras[].leave_seconds)
-    leave_seconds: float = 60.0
+    # someone must be gone this long before coming back alerts again (a face unseen this long is new;
+    # a camera that saw nobody this long is empty, and the next person in it is an arrival)
+    away_seconds: float = 30.0
+    arrive_seconds: float = 2.0  # someone must be in view this long in an empty camera to count as arrived
 
 
 @dataclass
@@ -227,7 +225,8 @@ def _migrate_face(face: dict | None) -> dict | None:
 # settings of the per-person tracker that people counting replaced; saved configs still contain them
 REMOVED_KEYS = {
     "detection": ("min_hits", "min_box_height", "overlap_confirm_seconds"),
-    "events": ("track_ttl", "lost_memory_seconds", "handoff_seconds"),
+    "events": ("track_ttl", "lost_memory_seconds", "handoff_seconds", "cooldown_seconds", "leave_seconds"),
+    "cameras": ("leave_seconds",),
     "face": ("trusted_min_matches",),
 }
 
@@ -238,11 +237,13 @@ def _drop_removed(raw: dict[str, Any]) -> None:
     if "trusted_min_matches" in face and "min_sightings" not in face:
         face["min_sightings"] = face["trusted_min_matches"]
     for section, keys in REMOVED_KEYS.items():
-        sec = raw.get(section) or {}
-        for k in keys:
-            if k in sec:
-                del sec[k]
-                dropped.append(f"{section}.{k}")
+        found = raw.get(section) or {}
+        for sec in found if isinstance(found, list) else [found]:  # cameras: a list of sections
+            for k in keys:
+                if isinstance(sec, dict) and k in sec:
+                    del sec[k]
+                    dropped.append(f"{section}.{k}")
+    dropped = list(dict.fromkeys(dropped))
     if dropped:
         log.warning("Ignoring settings that no longer exist (they are removed on the next save): %s", ", ".join(dropped))
 

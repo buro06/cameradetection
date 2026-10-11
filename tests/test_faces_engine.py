@@ -62,3 +62,13 @@ def test_larger_detector_input_still_finds_faces(engine, zidane):
     finally:
         engine.cfg.detect_size = 640
     assert len(faces) == 2 and sum(f.good for f in faces) == 1
+
+
+def test_face_found_in_a_person_box_at_the_small_crop_size(engine, zidane):
+    whole = next(f for f in engine.analyze(zidane, None, max_faces=5) if f.good)
+    x1, y1, x2, y2 = whole.box
+    w, h = x2 - x1, y2 - y1
+    body = (x1 - w, max(0, y1 - h / 2), x2 + w, min(zidane.shape[0], y1 + 6 * h))  # roughly their person box
+    found = engine.analyze(zidane, body, max_faces=2, det_size=320)
+    assert found and float(found[0].embedding @ whole.embedding) > 0.8
+    assert abs(found[0].box[0] - x1) < 0.2 * w and abs(found[0].box[1] - y1) < 0.2 * h

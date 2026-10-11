@@ -12,36 +12,24 @@
 
 ## How alerts are decided
 
-camwatch alerts on **arrivals**, not on presence. It doesn't follow individual bodies from frame to frame, so walking around, sitting down, turning away or a missed detection can't turn one person into two. It combines two signals.
+Three rules per camera, all on one time span, `events.away_seconds` (30s): **someone has to be gone 30s before coming back alerts again.**
 
-**People count (YOLO).**
-- Only solid person boxes count. A box must be at least `detection.person_min_height` (15%) of the frame height, or twice that if it's cut off at the frame edge, so an arm or shoulder poking into view doesn't count. A box inside a bigger one is the same person boxed twice.
-- The count goes **up** once more people have been in view for `events.arrive_seconds` (2s). That's an **arrival**.
-- The count goes **down** only once fewer people have been in view for `leave_seconds`. The default is 60s, for living rooms; set about 10s per camera for outdoor cameras people walk past (menu → Cameras → *camera* → **Leave time**, or `leave_seconds:` under the camera).
-
-**Faces (InsightFace).**
-- Every clear face in the frame is identified, wherever it is: a known person, or grouped with similar unknown faces.
-- Blurry or turned-away faces are ignored (`face.quality_min_sharpness`, `face.quality_max_turn`).
-- A face must be seen clearly at least `face.min_sightings` times (2) during a clip to count.
-
-**Activity sessions.** A session starts when someone appears in an empty scene and lasts until nobody has been in view for `leave_seconds`. Inside a session nothing re-alerts, except:
-- **more people** than before (the count rises again), or
-- **a new face** that hasn't been seen in this session.
-
-**Each event:**
-1. Starts on an arrival or a new face. The clip begins when the person first appeared (plus `events.pre_seconds`).
-2. Runs for `events.post_seconds` (5s) while faces keep being identified.
-3. Lists the people:
-   - everyone whose face was seen enough
-   - for each arrival that no newly seen face accounts for, a **"Person (face not visible)"** entry (mask, hood, dark room, back turned)
-4. Decides:
+1. **People (YOLO).** When someone appears in an empty camera, that's an **arrival**. Empty means no person seen for 30s, and the person must be in view for `events.arrive_seconds` (2s) to count. A box must be at least `detection.person_min_height` (15%) of the frame height, or twice that if cut off at the frame edge, so an arm poking into view doesn't count.
+2. **Faces (InsightFace), looked for only inside person boxes.**
+   - Each clear face is identified: a known person, or grouped with similar unknown faces.
+   - A face is **new** if this camera hasn't seen it for 30s and hasn't seen it at all since the camera was last empty. So someone sitting on the couch facing away doesn't re-alert when they turn round.
+   - Blurry or turned-away faces are ignored (`face.quality_min_sharpness`, `face.quality_max_turn`).
+3. **An arrival or a new face starts an event:**
+   - a 5s clip (`events.post_seconds`), starting when the person first appeared, while faces keep being identified
+   - faces seen clearly at least `face.min_sightings` times (2) are the people in it
+   - if someone arrived and no face was clear enough (mask, hood, dark room, back turned), it's a **"Person (face not visible)"**
    - no alert if every new person is trusted
-   - otherwise an alert, unless the same face already alerted on this camera within `events.cooldown_seconds` (60s)
-5. An alert still isn't *sent* if the same camera sent one less than `telegram.min_alert_interval_seconds` (30s) ago. It's clipped and logged as `rate-limited`.
+
+An alert still isn't *sent* if the same camera sent one less than `telegram.min_alert_interval_seconds` (30s) ago. It's clipped and logged as `rate-limited`.
 
 **Known limits:**
-- A household member who leaves the room (longer than `leave_seconds`) and comes back with their back to the camera alerts as "Person (face not visible)".
-- If someone masked arrives at the moment a trusted person who was already in the room shows their face for the first time in 10s, that face can account for the arrival and suppress the alert.
+- A household member who's been gone 30s and comes back with their back to the camera alerts as "Person (face not visible)".
+- Someone masked who joins a person already in view isn't reported, because only an arrival in an empty camera is noticed without a face.
 
 ## Install on Windows (Quadro M4000 / Maxwell)
 
@@ -58,7 +46,7 @@ camwatch doctor
 
 `camwatch doctor` should report `CUDA — Quadro M4000 (sm_52)` and `detector device: cuda:0`. If it reports *"not supported by torch …"*, a CUDA 12.8+/13 build of torch was installed. Reinstall with the cu126 command above.
 
-The face models run on `onnxruntime-gpu`, which reuses torch's CUDA libraries. `camwatch doctor` shows whether they run `on cuda` or `on cpu`. If onnxruntime can't use the GPU, they fall back to the CPU by themselves; if that makes the dashboard's inference FPS drop, lower `face.check_fps` (full-frame face scans per second per camera).
+The face models run on `onnxruntime-gpu`, which reuses torch's CUDA libraries. `camwatch doctor` shows whether they run `on cuda` or `on cpu`. If onnxruntime can't use the GPU, they fall back to the CPU by themselves; if that makes the dashboard's inference FPS drop, lower `face.check_fps` (face scans per second per camera while someone is in view).
 
 **Upgrading from YuNet + SFace:** on first start the face database is re-embedded from the photos in `data/faces/` and `data/unknown/` (this takes a moment and is logged). Anyone with no usable photo has to be enrolled again. `face.detector_score` and `face.match_threshold` are reset to the new models' defaults.
 
@@ -155,13 +143,13 @@ Logs are written to `data/logs/camwatch.log` (rotated), every event to `data/eve
 | Wrong name assigned | Move the wrong photos to the right person's folder (or delete them), then Settings → *Rebuild face database*. Raise `face.match_threshold` (0.4–0.45) and enroll more varied samples |
 | Known person shown as unknown | Enroll more samples (different light and angles), or lower `match_threshold` slightly (not below 0.28) |
 | Faces often drawn as "unclear face" | Lower `face.quality_min_sharpness` or raise `face.quality_max_turn` (more faces vote, but more wrong votes) |
-| Trusted person arriving gets "Person (face not visible)" | Their face isn't seen clearly twice during the 5s clip. Lower `face.min_face_px`, raise `face.detect_size` or `events.post_seconds`, or mount the camera at face height |
+| Trusted person arriving gets "Person (face not visible)" | Their face isn't seen clearly twice during the 5s clip. Lower `face.min_face_px`, raise `events.post_seconds`, or mount the camera at face height |
 | Brief false detections become "Person (face not visible)" alerts | Raise `events.arrive_seconds` (e.g. 3) or `detection.confidence` |
-| Same person alerts again after stepping out | Raise the camera's **Leave time** (`leave_seconds`); for recognised faces also `events.cooldown_seconds` |
-| Passers-by outdoors are merged into one alert | Lower that camera's `leave_seconds` (e.g. 5–10) |
+| Same person alerts again after stepping out | Raise `events.away_seconds` (e.g. 60) |
+| Passers-by outdoors are merged into one alert | Lower `events.away_seconds` (e.g. 10) |
 | Too many Telegram alerts | Raise `telegram.min_alert_interval_seconds` |
-| Faraway faces aren't recognised | Raise `face.detect_size` to 960 or 1280 (costs more) |
-| GPU overloaded | `detection.model: yolo11n.pt`, or lower `detection.detect_fps` / `face.check_fps` |
+| Faraway faces aren't recognised | Lower `face.min_face_px` (e.g. 30), or move the camera closer |
+| Det/s on the dashboard below `detection.detect_fps` (slow PC, no GPU) | `detection.model: yolo11n.pt`, `detection.imgsz: 480`, `detection.detect_fps: 3`, and `face.check_fps: 1`. Faces are only scanned while someone is in view, so an empty scene costs YOLO alone |
 
 All settings are documented in `config.example.yaml`.
 

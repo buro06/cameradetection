@@ -35,8 +35,10 @@ class FakeFaces:
 
     def __init__(self):
         self.faces: list[FaceObs] = []
+        self.calls: list[tuple] = []  # (region, det_size) of every scan
 
-    def analyze(self, frame, region=None, max_faces=1, min_score=None):
+    def analyze(self, frame, region=None, max_faces=1, min_score=None, det_size=None):
+        self.calls.append((region, det_size))
         out = []
         for f in self.faces:
             cx, cy = (f.box[0] + f.box[2]) / 2, (f.box[1] + f.box[3]) / 2
@@ -52,6 +54,4 @@ def db(tmp_path):
 
 @pytest.fixture
 def cfg(tmp_path):
-    c = AppConfig(data_dir=str(tmp_path))
-    c.events.cooldown_seconds = 60
-    return c
+    return AppConfig(data_dir=str(tmp_path))

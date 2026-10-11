@@ -8,6 +8,8 @@ FRAME = np.zeros((720, 1280, 3), np.uint8)
 LEFT = [100, 100, 400, 700]
 RIGHT = [800, 100, 1100, 700]
 NESTED = [150, 330, 360, 660]  # torso-only box inside LEFT (YOLO boxing the same person twice)
+SMALL = [600, 300, 660, 380]  # far away: too small to count as someone arriving
+SMALL_FACE = (615, 305, 645, 335)
 LEFT_FACE = (200, 120, 300, 230)
 RIGHT_FACE = (900, 120, 1000, 230)
 FPS = 5.0
@@ -61,20 +63,19 @@ def near(base: np.ndarray, similarity: float, seed: int) -> np.ndarray:
     return similarity * base + np.sqrt(1 - similarity ** 2) * other
 
 
-# ---- people count --------------------------------------------------------------------------------
+# ---- people ---------------------------------------------------------------------------------------
 def test_edge_cut_and_small_boxes_do_not_count():
     h, w = FRAME.shape[:2]
     arm_at_edge = [0, 300, 120, 500]  # cut off at the left edge and short
-    small = [600, 300, 660, 380]  # far away / tiny
     tall_at_edge = [0, 100, 250, 700]  # someone close to the camera, half in frame
-    kept = solid_people(dets(arm_at_edge, small, tall_at_edge, LEFT, NESTED), w, h, 0.15)
-    assert sorted(b.tolist() for b in kept) == sorted([tall_at_edge, LEFT])  # NESTED is LEFT boxed twice
+    kept = solid_people(dets(arm_at_edge, SMALL, tall_at_edge, LEFT), w, h, 0.15)
+    assert sorted(b.tolist() for b in kept) == sorted([tall_at_edge, LEFT])
 
 
 def test_arm_at_frame_edge_is_not_an_arrival(cfg, db):
     mon, _ = make_monitor(cfg, db)
     results, _ = run(mon, [[0, 300, 120, 500]], 0.0, 10)
-    assert results == [] and mon.level == 0
+    assert results == [] and mon.occupied_since is None
 
 
 def test_single_frame_false_positive_is_ignored(cfg, db):
@@ -91,7 +92,7 @@ def test_trusted_person_alone_is_suppressed(cfg, db):
     mon, faces = make_monitor(cfg, db)
     results, _ = run(mon, [LEFT], 0.0, 6, faces, [face(LEFT_FACE, alice)])
     assert [r.decision for r in results] == ["trusted"]
-    assert [p.name for p in results[0].people] == ["Alice"]  # her face explains the arrival
+    assert [p.name for p in results[0].people] == ["Alice"]  # her face says who arrived
 
 
 def test_unknown_next_to_trusted_alerts(cfg, db):
@@ -137,10 +138,16 @@ def test_face_needs_enough_sightings(cfg, db):
 
 def test_unknown_face_seen_once_is_dropped(cfg, db):
     mon, faces = make_monitor(cfg, db)
-    faces.faces = [face(LEFT_FACE, unit(50))]
-    mon.process(FRAME, dets(), 0.0)
+    faces.faces = [face(SMALL_FACE, unit(50))]
+    mon.process(FRAME, dets(SMALL), 0.0)
     results, _ = run(mon, [], 0.2, 8, faces, [])
     assert results == [] and db.list_unknowns() == []
+
+
+def test_face_outside_every_person_box_is_not_looked_at(cfg, db):
+    mon, faces = make_monitor(cfg, db)
+    results, _ = run(mon, [LEFT], 0.0, 6, faces, [face(RIGHT_FACE, unit(50))])
+    assert [p.label for p in results[0].people] == ["Person (face not visible)"]
 
 
 def test_known_untrusted_person_alerts_with_name(cfg, db):
@@ -178,18 +185,7 @@ def test_two_strangers_arriving_together_alert_once_listing_both(cfg, db):
     assert len(results[0].people) == 2
 
 
-def test_trusted_face_at_a_bad_angle_stays_trusted(cfg, db):
-    alice = unit(10)
-    enroll(db, "Alice", alice, trusted=True)
-    mon, faces = make_monitor(cfg, db)
-    results, t = run(mon, [LEFT], 0.0, 6, faces, [face(LEFT_FACE, alice)])
-    assert [r.decision for r in results] == ["trusted"]
-    # she is here, so a face just under the match threshold is her, not a stranger
-    results, _ = run(mon, [LEFT], t, 120, faces, [face(LEFT_FACE, near(alice, db.threshold - 0.04, 12))])
-    assert results == [] and db.list_unknowns() == []
-
-
-def test_lookalike_of_absent_person_is_a_stranger(cfg, db):
+def test_lookalike_of_a_known_person_is_a_stranger(cfg, db):
     alice = unit(10)
     enroll(db, "Alice", alice, trusted=True)
     mon, faces = make_monitor(cfg, db)
@@ -197,7 +193,7 @@ def test_lookalike_of_absent_person_is_a_stranger(cfg, db):
     assert results[0].decision == "alert" and results[0].people[0].label.startswith("Unknown #")
 
 
-# ---- activity sessions ---------------------------------------------------------------------------
+# ---- the 30 second rule ---------------------------------------------------------------------------
 def test_couch_sitter_turning_away_for_ten_minutes_never_realerts(cfg, db):
     mon, faces = make_monitor(cfg, db)
     stranger = unit(60)
@@ -227,77 +223,55 @@ def test_walking_around_double_boxed_and_occluded_alerts_once(cfg, db):
     assert len(results[0].people) == 1
 
 
-def test_count_flicker_within_leave_time_is_not_a_new_arrival(cfg, db):
+@pytest.mark.parametrize("gone, alerts", [(20, ["alert"]), (40, ["alert", "alert"])])
+def test_masked_person_returning_alerts_only_after_30s_away(cfg, db, gone, alerts):
     mon, _ = make_monitor(cfg, db)
     results, t = run(mon, [LEFT], 0.0, 6)
-    gone, t = run(mon, [], t, 20)  # stepped out (or hidden) for 20 s < leave_seconds
-    back, _ = run(mon, [LEFT], t, 10)
-    assert [r.decision for r in results] == ["alert"] and gone == [] and back == []
+    more, t = run(mon, [], t, gone)
+    back, _ = run(mon, [LEFT], t, 6)
+    assert [r.decision for r in results + more + back] == alerts
 
 
-def test_masked_person_after_the_room_emptied_alerts_again(cfg, db):
-    mon, _ = make_monitor(cfg, db)
-    results, t = run(mon, [LEFT], 0.0, 6)
-    _, t = run(mon, [], t, cfg.events.leave_seconds + 5)
-    again, _ = run(mon, [LEFT], t, 6)
-    assert [r.decision for r in results + again] == ["alert", "alert"]
+@pytest.mark.parametrize("gone, alerts", [(20, ["alert"]), (40, ["alert", "alert"])])
+def test_stranger_returning_alerts_only_after_30s_away(cfg, db, gone, alerts):
+    mon, faces = make_monitor(cfg, db)
+    stranger = unit(80)
+    first, t = run(mon, [LEFT], 0.0, 6, faces, [face(LEFT_FACE, stranger)])
+    _, t = run(mon, [], t, gone, faces, [])
+    back, _ = run(mon, [LEFT], t, 6, faces, [face(LEFT_FACE, stranger)])
+    assert [r.decision for r in first + back] == alerts
+    assert all(r.people[0].key == first[0].people[0].key for r in back)  # recognised as the same unknown
 
 
-def test_extra_person_during_a_session_alerts(cfg, db):
+def test_trusted_person_coming_back_is_trusted(cfg, db):
+    alice = unit(10)
+    enroll(db, "Alice", alice, trusted=True)
+    mon, faces = make_monitor(cfg, db)
+    results, t = run(mon, [LEFT], 0.0, 6, faces, [face(LEFT_FACE, alice)])
+    _, t = run(mon, [], t, 70, faces, [])  # left the room
+    back, _ = run(mon, [LEFT], t, 6, faces, [face(LEFT_FACE, alice)])
+    assert [r.decision for r in results + back] == ["trusted", "trusted"]
+
+
+def test_new_face_joining_someone_present_alerts(cfg, db):
     alice = unit(10)
     enroll(db, "Alice", alice, trusted=True)
     mon, faces = make_monitor(cfg, db)
     results, t = run(mon, [LEFT], 0.0, 6, faces, [face(LEFT_FACE, alice)])
     _, t = run(mon, [LEFT], t, 30, faces, [])  # Alice sits facing away
-    later, _ = run(mon, [LEFT, RIGHT], t, 6)  # someone masked joins her
-    assert [r.decision for r in results] == ["trusted"]
-    assert [r.decision for r in later] == ["alert"]
-    assert [p.label for p in later[0].people] == ["Person (face not visible)"]
+    later, _ = run(mon, [LEFT, RIGHT], t, 6, faces, [face(RIGHT_FACE, unit(70))])
+    assert [r.decision for r in results + later] == ["trusted", "alert"]
+    assert [p.label for p in later[0].people if p.new][0].startswith("Unknown #")
 
 
-def test_new_face_during_a_session_alerts_even_without_count_change(cfg, db):
+def test_masked_person_joining_someone_present_is_not_reported(cfg, db):
+    # accepted gap: without a face, only an arrival in an empty camera is noticed
     alice = unit(10)
     enroll(db, "Alice", alice, trusted=True)
     mon, faces = make_monitor(cfg, db)
-    results, t = run(mon, [LEFT, RIGHT], 0.0, 6, faces, [face(LEFT_FACE, alice)])  # the other one faces away
-    later, _ = run(mon, [LEFT, RIGHT], t + 30, 6, faces, [face(LEFT_FACE, alice), face(RIGHT_FACE, unit(70))])
-    assert [r.decision for r in results] == ["alert"]  # 2 arrived, only Alice's face seen
-    assert [r.decision for r in later] == ["alert"]
-    assert any(p.label.startswith("Unknown #") and p.new for p in later[0].people)
-
-
-def test_trusted_person_coming_back_shows_their_face(cfg, db):
-    cfg.events.cooldown_seconds = 60
-    mon, faces = make_monitor(cfg, db)
-    alice = unit(10)
-    enroll(db, "Alice", alice, trusted=True)
     results, t = run(mon, [LEFT], 0.0, 6, faces, [face(LEFT_FACE, alice)])
-    _, t = run(mon, [], t, 70, faces, [])  # left the room
-    back, _ = run(mon, [LEFT], t, 6, faces, [face(LEFT_FACE, alice)])
-    assert [r.decision for r in results + back] == ["trusted", "trusted"]
-    assert [p.name for p in back[0].people] == ["Alice"]  # her face accounts for the arrival
-
-
-def test_same_stranger_returning_within_cooldown_is_not_new(cfg, db):
-    cfg.events.cooldown_seconds = 120
-    mon, faces = make_monitor(cfg, db)
-    stranger = unit(80)
-    first, t = run(mon, [LEFT], 0.0, 6, faces, [face(LEFT_FACE, stranger)])
-    _, t = run(mon, [], t, 70, faces, [])
-    back, t = run(mon, [LEFT], t, 6, faces, [face(LEFT_FACE, stranger)])
-    _, t = run(mon, [], t, 130, faces, [])
-    later, _ = run(mon, [LEFT], t, 6, faces, [face(LEFT_FACE, stranger)])
-    assert [r.decision for r in first + back + later] == ["alert", "unchanged", "alert"]
-    assert later[0].people[0].key == first[0].people[0].key  # recognised as the same unknown each time
-
-
-def test_outdoor_camera_passers_by_are_separate_sessions(cfg, db):
-    mon, _ = make_monitor(cfg, db)
-    mon.stream.cfg.leave_seconds = 10
-    first, t = run(mon, [LEFT], 0.0, 6)
-    _, t = run(mon, [], t, 24)
-    second, _ = run(mon, [RIGHT], t, 6)
-    assert [r.decision for r in first + second] == ["alert", "alert"]
+    later, _ = run(mon, [LEFT, RIGHT], t, 10, faces, [])
+    assert [r.decision for r in results] == ["trusted"] and later == []
 
 
 def test_disarmed_camera_does_not_alert(cfg, db):
@@ -306,12 +280,32 @@ def test_disarmed_camera_does_not_alert(cfg, db):
     assert results[0].decision == "disarmed"
 
 
-def test_camera_outage_resets_the_count(cfg, db):
+def test_camera_outage_longer_than_30s_counts_as_empty(cfg, db):
     mon, _ = make_monitor(cfg, db)
     results, t = run(mon, [LEFT], 0.0, 6)
-    assert mon.level == 1
-    again, _ = run(mon, [LEFT], t + cfg.events.leave_seconds + 30, 6)  # stream was down meanwhile
+    again, _ = run(mon, [LEFT], t + cfg.events.away_seconds + 10, 6)  # stream was down meanwhile
     assert [r.decision for r in results + again] == ["alert", "alert"]
+
+
+# ---- face scan cost --------------------------------------------------------------------------------
+def test_no_face_scans_while_nobody_is_in_view(cfg, db):
+    mon, faces = make_monitor(cfg, db)
+    run(mon, [], 0.0, 10)
+    assert faces.calls == []
+
+
+def test_faces_are_looked_for_in_each_person_box(cfg, db):
+    mon, faces = make_monitor(cfg, db)
+    run(mon, [LEFT], 0.0, 2)
+    assert len(faces.calls) == 4  # check_fps 2/s
+    assert all(region == tuple(map(float, LEFT)) and size == 320 for region, size in faces.calls)
+
+
+def test_a_crowd_gets_one_whole_frame_scan(cfg, db):
+    mon, faces = make_monitor(cfg, db)
+    crowd = [[100 + 200 * i, 100, 280 + 200 * i, 700] for i in range(5)]
+    run(mon, crowd, 0.0, 0.2)
+    assert faces.calls == [(None, None)]
 
 
 # ---- clip window ---------------------------------------------------------------------------------
