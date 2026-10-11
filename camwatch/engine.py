@@ -123,12 +123,15 @@ class Engine:
             stream.start()
             log.info("[%s] started (%s)", cam.name, describe_source(cam.source))
 
-    def stop_camera(self, name: str) -> None:
+    def stop_camera(self, name: str, wait: bool = False) -> None:
+        """Stop a camera; with `wait`, until its device is released (so it can be opened again right away)."""
         with self._cam_lock:
             self.monitors.pop(name, None)
             s = self.streams.pop(name, None)
         if s:
             s.stop()
+            if wait:
+                s.join(timeout=12.0)
 
     def apply_camera(self, cam: CameraConfig) -> None:
         """(Re)start a camera after it was added or edited."""

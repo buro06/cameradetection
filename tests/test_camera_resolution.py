@@ -3,8 +3,11 @@ import logging
 import cv2
 import pytest
 
+import numpy as np
+
 import camwatch.camera as camera
 import camwatch.menus as menus
+import camwatch.usbcams as usbcams
 from camwatch.config import CameraConfig, ClipConfig
 
 
@@ -33,10 +36,16 @@ class FakeCapture:
     def get(self, prop):
         return {cv2.CAP_PROP_FRAME_WIDTH: self.size[0], cv2.CAP_PROP_FRAME_HEIGHT: self.size[1]}.get(prop, 0)
 
+    def read(self):
+        return True, np.zeros((self.size[1], self.size[0], 3), np.uint8)
+
+    def release(self):
+        pass
+
 
 def open_usb(monkeypatch, platform, fake, **cam):
-    monkeypatch.setattr(camera.sys, "platform", platform)
-    monkeypatch.setattr(camera.cv2, "VideoCapture", fake)
+    monkeypatch.setattr(usbcams.sys, "platform", platform)
+    monkeypatch.setattr(usbcams.cv2, "VideoCapture", fake)
     stream = camera.CameraStream(CameraConfig(name="usb", source="0", **cam), ClipConfig(), 2.0)
     stream._open()
     return fake
@@ -51,9 +60,17 @@ def test_windows_requests_mjpg_before_resolution(monkeypatch):
     assert fake.calls == [(cv2.CAP_PROP_FOURCC, MJPG), (cv2.CAP_PROP_FRAME_WIDTH, 1920), (cv2.CAP_PROP_FRAME_HEIGHT, 1080)]
 
 
-def test_auto_fourcc_is_left_alone_off_windows(monkeypatch):
+def test_auto_fourcc_is_left_alone_on_macos(monkeypatch):
     fake = open_usb(monkeypatch, "darwin", FakeCapture(), width=1920, height=1080)
     assert (cv2.CAP_PROP_FOURCC, MJPG) not in fake.calls
+
+
+def test_linux_uses_v4l2_and_asks_for_mjpg_above_640x480(monkeypatch):
+    fake = open_usb(monkeypatch, "linux", FakeCapture(), width=1920, height=1080)
+    assert fake.opened_with == (0, cv2.CAP_V4L2)
+    assert fake.calls[0] == (cv2.CAP_PROP_FOURCC, MJPG)
+    small = open_usb(monkeypatch, "linux", FakeCapture(), width=640, height=480)
+    assert (cv2.CAP_PROP_FOURCC, MJPG) not in small.calls
 
 
 def test_fourcc_none_and_explicit(monkeypatch):
@@ -99,22 +116,80 @@ def test_no_fps_requested_by_default(monkeypatch):
 
 
 def test_mjpg_reapplied_when_fps_change_drops_it(monkeypatch, caplog):
-    with caplog.at_level(logging.INFO, logger="camwatch.camera"):
+    with caplog.at_level(logging.INFO, logger="camwatch.usbcams"):
         fake = open_usb(monkeypatch, "win32", FormatDroppingCapture(), width=1920, height=1080, fps=30)
     assert fake.calls[-1] == (cv2.CAP_PROP_FOURCC, MJPG) and fake.fourcc == MJPG
     assert "ignored pixel format" not in caplog.text and "1920x1080 MJPG" in caplog.text
 
 
 def test_ignored_pixel_format_is_logged(monkeypatch, caplog):
-    with caplog.at_level(logging.WARNING, logger="camwatch.camera"):
+    with caplog.at_level(logging.WARNING, logger="camwatch.usbcams"):
         open_usb(monkeypatch, "win32", FormatDroppingCapture(sticky=False), width=1920, height=1080, fps=30)
     assert "camera ignored pixel format MJPG and uses YUY2" in caplog.text
 
 
-def test_resolution_mismatch_is_logged(monkeypatch, caplog):
+def test_resolution_mismatch_is_logged_from_real_frames(monkeypatch, caplog):
+    monkeypatch.setattr(usbcams.sys, "platform", "win32")
+    monkeypatch.setattr(usbcams.cv2, "VideoCapture", FakeCapture(honor=False))
+    stream = camera.CameraStream(CameraConfig(name="usb", source="0", width=1920, height=1080), ClipConfig(), 2.0)
+    monkeypatch.setattr(stream, "_on_frame", lambda frame: stream.stop())  # one frame is enough
     with caplog.at_level(logging.WARNING, logger="camwatch.camera"):
-        open_usb(monkeypatch, "win32", FakeCapture(honor=False), width=1920, height=1080)
+        stream._run_stream()
     assert "requested 1920x1080 but camera delivers 640x360" in caplog.text
+
+
+# ---- finding a setup that works ------------------------------------------------------------
+class PickyCapture(FakeCapture):
+    """Only delivers the requested size with one backend + format; otherwise stays at 640x480."""
+
+    def __init__(self, works):
+        super().__init__(native=(640, 480))
+        self.works, self.tried = works, []
+
+    def __call__(self, index, backend):
+        fresh = PickyCapture(self.works)
+        fresh.backend, fresh.fourcc, fresh.tried = backend, 0, self.tried
+        return fresh
+
+    def set(self, prop, value):
+        if prop == cv2.CAP_PROP_FOURCC:
+            self.fourcc = int(value)
+        ok = (self.backend, self.fourcc) == self.works
+        if prop in (cv2.CAP_PROP_FRAME_WIDTH, cv2.CAP_PROP_FRAME_HEIGHT) and not ok:
+            return False
+        return super().set(prop, value)
+
+    def release(self):
+        self.tried.append((self.backend, self.fourcc))
+
+
+def test_finds_the_setup_that_really_delivers_1080p(monkeypatch):
+    monkeypatch.setattr(usbcams.sys, "platform", "linux")
+    fake = PickyCapture(works=(cv2.CAP_V4L2, cv2.VideoWriter_fourcc(*"YUY2")))
+    monkeypatch.setattr(usbcams.cv2, "VideoCapture", fake)
+    cam = CameraConfig(name="usb", source="usb:Cam", width=1920, height=1080)
+    result = usbcams.find_working_setup(0, cam)
+    assert (result.backend, result.fourcc, result.size) == ("v4l2", "YUY2", (1920, 1080))
+    assert len(fake.tried) == 2  # v4l2+MJPG first, then v4l2+YUY2
+
+
+def test_reports_the_best_size_when_nothing_reaches_the_request(monkeypatch):
+    monkeypatch.setattr(usbcams.sys, "platform", "win32")
+    monkeypatch.setattr(usbcams.cv2, "VideoCapture", PickyCapture(works=(None, None)))
+    result = usbcams.find_working_setup(0, CameraConfig(name="usb", source="0", width=3840, height=2160))
+    assert result.size == (640, 480) and result.frame is not None
+
+
+def test_media_foundation_only_tried_with_a_single_camera(monkeypatch):
+    monkeypatch.setattr(usbcams.sys, "platform", "win32")
+    assert ("msmf", "MJPG") in usbcams.candidate_setups(single_camera=True)
+    assert all(b != "msmf" for b, _ in usbcams.candidate_setups(single_camera=False))
+
+
+def test_missing_named_camera_is_a_clear_connection_error(monkeypatch):
+    monkeypatch.setattr(usbcams, "list_cameras", lambda modes=True: [usbcams.UsbCamera("Other", 0)])
+    with pytest.raises(ConnectionError, match="USB camera 'Logitech BRIO' is not connected"):
+        usbcams.resolve_index(CameraConfig(name="usb", source="usb:Logitech BRIO"))
 
 
 # ---- menu pickers ------------------------------------------------------------------------

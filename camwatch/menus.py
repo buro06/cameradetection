@@ -22,6 +22,7 @@ from .camera import CameraStream, describe_source
 from .config import AppConfig, CameraConfig, field_default, yaml_scalar
 from .engine import Engine
 from .faces import MAX_EMBEDDINGS_PER_PERSON, image_files, read_image
+from .usbcams import SetupResult, UsbCamera, find_working_setup, is_usb_source, list_cameras, try_setup
 
 log = logging.getLogger(__name__)
 BACK = "↩  Back"
@@ -165,7 +166,8 @@ def main_menu(engine: Engine, console: Console) -> str | None:
 
 
 # ---- cameras ---------------------------------------------------------------------------------
-SOURCE_HELP = ("USB index (0, 1, …), rtsp://user:pass@host:554/stream, http(s)://…/video.mjpg, "
+ADD_USB, ADD_OTHER = "➕  Add USB camera", "🌐  Add network camera (RTSP/HTTP) or video file"
+SOURCE_HELP = ("rtsp://user:pass@host:554/stream, http(s)://…/video.mjpg, "
                "http(s)://…/snapshot.jpg, or a video file path")
 
 
@@ -182,16 +184,11 @@ def cameras_menu(engine: Engine, console: Console) -> None:
             t.add_row(cam.name, describe_source(cam.source), "yes" if cam.enabled else "no", r.get("status", ""),
                       _resolution_text(cam, r.get("resolution", (0, 0))))
         console.print(t)
-        choice = _select("Cameras:", [*(questionary.Choice(c.name, c) for c in cfg.cameras), "➕  Add camera",
-                                      "🔍  Scan for USB cameras", BACK])
+        choice = _select("Cameras:", [*(questionary.Choice(c.name, c) for c in cfg.cameras), ADD_USB, ADD_OTHER, BACK])
         if choice is None or choice == BACK:
             return
-        if choice == "➕  Add camera":
-            cam = add_camera_flow(cfg, console)
-            if cam:
-                engine.apply_camera(cam)
-        elif choice == "🔍  Scan for USB cameras":
-            cam = scan_usb(cfg, console)
+        if choice in (ADD_USB, ADD_OTHER):
+            cam = add_usb_flow(cfg, console) if choice == ADD_USB else add_camera_flow(cfg, console)
             if cam:
                 engine.apply_camera(cam)
         else:
@@ -203,7 +200,23 @@ FRAME_RATES = [15, 24, 25, 30, 60]
 
 
 def is_usb(cam: CameraConfig) -> bool:
-    return cam.source.strip().isdigit()
+    return is_usb_source(cam.source)
+
+
+def usb_camera_of(cam: CameraConfig, cams: list[UsbCamera]) -> UsbCamera | None:
+    """The listed camera a configured USB source refers to (by index or by name)."""
+    src = cam.source.strip()
+    if src.isdigit():
+        return next((c for c in cams if c.index == int(src)), None)
+    return next((c for c in cams if c.source == src), None)
+
+
+def default_size(usb: UsbCamera | None) -> tuple[int, int]:
+    """1080p if the camera has it, else the largest size up to 1080p (most webcams today are 1080p)."""
+    sizes = [(w, h) for w, h, *_ in usb.sizes()] if usb else []
+    if not sizes or (1920, 1080) in sizes:
+        return 1920, 1080
+    return next(((w, h) for w, h in sizes if w * h <= 1920 * 1080), sizes[0])
 
 
 def _resolution_text(cam: CameraConfig, actual: tuple[int, int]) -> str:
@@ -213,16 +226,24 @@ def _resolution_text(cam: CameraConfig, actual: tuple[int, int]) -> str:
     return got
 
 
-def pick_resolution(cam: CameraConfig, mark_current: bool = True) -> bool | None:
-    """Ask for a USB capture resolution. None = cancelled, else whether it changed."""
+def pick_resolution(cam: CameraConfig, mark_current: bool = True, usb: UsbCamera | None = None) -> bool | None:
+    """Ask for a USB capture resolution, from the camera's own list of modes when known.
+    None = cancelled, else whether it changed."""
     current = (cam.width, cam.height)
     mark = lambda wh: "  ← current" if mark_current and wh == current else ""  # noqa: E731
+    sizes = usb.sizes() if usb else []
+    if sizes:
+        presets = [(w, h) for w, h, *_ in sizes]
+        labels = [f"{w}x{h}  {fmt}{f' · {fps:g} fps' if fps else ''}" for w, h, fmt, fps in sizes]
+    else:
+        presets, labels = RESOLUTIONS, [f"{w}x{h}" for w, h in RESOLUTIONS]
     choices = [questionary.Choice(f"Camera default{mark((0, 0))}", (0, 0))]
-    choices += [questionary.Choice(f"{w}x{h}{mark((w, h))}", (w, h)) for w, h in RESOLUTIONS]
+    choices += [questionary.Choice(f"{label}{mark(wh)}", wh) for wh, label in zip(presets, labels)]
     choices.append(questionary.Choice("Custom…", "custom"))
-    default = current if current == (0, 0) or current in RESOLUTIONS else "custom"
-    pick = _select("Capture resolution (USB cameras only; network cameras are configured in their own web UI):",
-                   choices, default=default)
+    default = current if current == (0, 0) or current in presets else "custom"
+    title = (f"Resolution ({usb.name} supports these):" if sizes else
+             "Capture resolution (USB cameras only; network cameras are configured in their own web UI):")
+    pick = _select(title, choices, default=default)
     if pick is None:
         return None
     if pick == "custom":
@@ -260,13 +281,13 @@ def pick_fps(cam: CameraConfig) -> bool | None:
 def pick_usb_format(cam: CameraConfig) -> bool | None:
     """Ask for USB pixel format and capture backend. None = cancelled, else whether it changed."""
     fourcc = _select("Pixel format (MJPG is needed for HD on most USB 2.0 webcams):", [
-        questionary.Choice("auto (MJPG on Windows)", "auto"), questionary.Choice("MJPG", "MJPG"),
+        questionary.Choice("auto (MJPG on Windows, and on Linux for HD)", "auto"), questionary.Choice("MJPG", "MJPG"),
         questionary.Choice("YUY2 (uncompressed, low res/fps)", "YUY2"), questionary.Choice("none (driver default)", "none")],
         default=cam.fourcc if cam.fourcc in ("auto", "MJPG", "YUY2", "none") else "auto")
     if fourcc is None:
         return None
     backend = _select("Capture backend:", [
-        questionary.Choice("auto (DirectShow on Windows)", "auto"), questionary.Choice("dshow (DirectShow)", "dshow"),
+        questionary.Choice("auto (DirectShow on Windows, V4L2 on Linux)", "auto"), questionary.Choice("dshow (DirectShow)", "dshow"),
         questionary.Choice("msmf (Media Foundation)", "msmf"), questionary.Choice("avfoundation (macOS)", "avfoundation"),
         questionary.Choice("v4l2 (Linux)", "v4l2")],
         default=cam.backend if cam.backend in ("auto", "dshow", "msmf", "avfoundation", "v4l2") else "auto")
@@ -290,7 +311,7 @@ def _wait_resolution(engine: Engine, name: str, timeout: float = 12.0) -> tuple[
 def _report_resolution(console: Console, cam: CameraConfig, got: tuple[int, int]) -> None:
     if is_usb(cam) and cam.width and cam.height and got != (cam.width, cam.height):
         console.print(f"[yellow]Camera delivers {got[0]}x{got[1]}, not the requested {cam.width}x{cam.height}.[/] "
-                      "Try another resolution, or Pixel format → MJPG / backend → msmf.")
+                      "Pick Resolution again: it tries other capture setups.")
     else:
         console.print(f"[green]OK[/] — {got[0]}x{got[1]}")
 
@@ -349,9 +370,106 @@ def scan_usb(cfg: AppConfig, console: Console) -> CameraConfig | None:
     return None
 
 
+def add_usb_flow(cfg: AppConfig, console: Console) -> CameraConfig | None:
+    """Pick a USB camera by name, then one of its resolutions; finds a capture setup that delivers it."""
+    with console.status("Looking for USB cameras …"):
+        cams = list_cameras()
+    if not cams:
+        console.print("[yellow]This system can't list cameras by name; trying indexes 0–5 instead.[/]")
+        return scan_usb(cfg, console)
+    in_use = {u.name: c.name for c in cfg.cameras if is_usb(c) and (u := usb_camera_of(c, cams))}
+    usb = _select("Which camera?", [
+        *(questionary.Choice(u.describe(), u, disabled=f"in use by {in_use[u.name]}" if u.name in in_use else None)
+          for u in cams), BACK])
+    if usb is None or usb == BACK:
+        return None
+    name = _text("Camera name:", default=usb.name if cfg.camera(usb.name) is None else "",
+                 validate=lambda s: bool(s.strip()) and cfg.camera(s.strip()) is None or "Name empty or already used")
+    if not name:
+        return None
+    cam = CameraConfig(name=name.strip(), source=usb.source)
+    cam.width, cam.height = default_size(usb)
+    if pick_resolution(cam, mark_current=False, usb=usb) is None:
+        return None
+    result = setup_usb(console, cam, usb.index, single_camera=len(cams) == 1)
+    if result.frame is None:
+        if not _confirm("Save it anyway (it will keep retrying)?", default=False):
+            return None
+    else:
+        show_test_frame(cfg, console, cam, result.frame)
+    cfg.cameras.append(cam)
+    cfg.save()
+    console.print(f"Saved camera [b]{cam.name}[/] ({cam.source}).")
+    _pause()
+    return cam
+
+
+def setup_usb(console: Console, cam: CameraConfig, index: int, single_camera: bool) -> SetupResult:
+    """Find a backend/format that really delivers the chosen size and store it in `cam`."""
+    wanted = (cam.width, cam.height) if cam.width and cam.height else None
+    with console.status("Testing the camera (tries a few capture setups; can take up to a minute) …"):
+        result = find_working_setup(index, cam, single_camera) if wanted else try_setup(index, cam)
+    if result.size is None:
+        console.print("[red]No picture from this camera.[/] Is another program using it?")
+        return result
+    cam.backend, cam.fourcc = result.backend, result.fourcc
+    if wanted is None or result.size == wanted:
+        console.print(f"[green]OK[/] — {result.describe()}")
+    else:
+        w, h = result.size
+        console.print(f"[yellow]The camera didn't deliver {wanted[0]}x{wanted[1]}; the best was {result.describe()}.[/]")
+        if _confirm(f"Use {w}x{h}?", default=True):
+            cam.width, cam.height = w, h
+    return result
+
+
+def show_test_frame(cfg: AppConfig, console: Console, cam: CameraConfig, frame: np.ndarray) -> None:
+    path = cfg.data_path / "snapshots" / f"{cam.name}_setup.jpg"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(path), frame)
+    console.print(f"Test picture: {path}")
+    if _confirm("Open it to check it's the right camera?", default=True):
+        open_image(path)
+
+
+def change_usb_resolution(engine: Engine, console: Console, cam: CameraConfig) -> None:
+    with console.status("Looking for USB cameras …"):
+        cams = list_cameras()
+    usb = usb_camera_of(cam, cams)
+    changed = pick_resolution(cam, usb=usb)
+    if not changed:
+        return
+    src = cam.source.strip()
+    index = usb.index if usb else (int(src) if src.isdigit() else None)
+    if index is None:
+        console.print(f"[red]{src[4:]} is not connected.[/] The new resolution is saved and used when it is.")
+    else:
+        engine.stop_camera(cam.name, wait=True)  # release the device so it can be tested
+        setup_usb(console, cam, index, single_camera=len(cams) <= 1)
+    cfg = engine.cfg
+    cfg.save()
+    engine.apply_camera(cam)
+    _pause()
+
+
+def switch_to_named_source(engine: Engine, console: Console, cam: CameraConfig) -> None:
+    with console.status("Looking for USB cameras …"):
+        usb = usb_camera_of(cam, list_cameras(modes=False))
+    if usb is None:
+        console.print(f"[yellow]No camera listed at index {cam.source}.[/]")
+    elif _confirm(f"Index {cam.source} is \"{usb.name}\". Use it by name from now on (survives re-plugging)?"):
+        cam.source = usb.source
+        engine.cfg.save()
+        engine.apply_camera(cam)
+        console.print(f"Source is now [b]{cam.source}[/].")
+    _pause()
+
+
 def camera_actions(engine: Engine, console: Console, cam: CameraConfig) -> None:
     cfg = engine.cfg
     usb_actions = ["📐  Resolution", "🎞   Frame rate", "🎛   Pixel format / capture backend"] if is_usb(cam) else []
+    if cam.source.strip().isdigit():
+        usb_actions.append("🔗  Use this camera by name instead of index")
     action = _select(f"{cam.name}:", ["📸  Snapshot", "✏️   Edit source", *usb_actions,
                                       "⏯   Disable" if cam.enabled else "⏯   Enable", "🗑   Remove", BACK])
     if action is None or action == BACK:
@@ -360,8 +478,12 @@ def camera_actions(engine: Engine, console: Console, cam: CameraConfig) -> None:
         if not save_snapshots(engine, cameras=[cam.name]):
             console.print("[yellow]No frame available.[/]")
             _pause()
-    elif "Resolution" in action or "Frame rate" in action or "Pixel format" in action:
-        picker = pick_resolution if "Resolution" in action else pick_fps if "Frame rate" in action else pick_usb_format
+    elif "Resolution" in action:
+        change_usb_resolution(engine, console, cam)
+    elif "by name" in action:
+        switch_to_named_source(engine, console, cam)
+    elif "Frame rate" in action or "Pixel format" in action:
+        picker = pick_fps if "Frame rate" in action else pick_usb_format
         changed = picker(cam)
         if changed:
             cfg.save()

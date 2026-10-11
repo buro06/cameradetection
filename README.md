@@ -67,6 +67,17 @@ camwatch            # start monitoring with the live dashboard
 
 Alerts go to `chat_ids`. Commands are accepted only from those chats or from `allowed_user_ids`; everything else is ignored and logged. To keep the token out of `config.yaml`, set it in the `CAMWATCH_TELEGRAM_TOKEN` environment variable instead.
 
+### USB cameras
+
+Menu → Cameras → **Add USB camera** lists the cameras that are plugged in by name (e.g. `Logitech BRIO — up to 3840x2160`), then the resolutions that camera supports. camwatch then tests the camera:
+
+- It tries the capture setups for your OS (MJPG or YUY2, DirectShow or Media Foundation on Windows, V4L2 on Linux) until the frames really come out at that size, and saves the one that works.
+- It shows a test picture so you can check it's the right camera.
+
+The camera is saved by name (`source: "usb:Logitech BRIO"`), so it stays the same camera when it's re-plugged or the PC restarts. Two identical cameras are told apart as `#2`. Cameras added by index (`source: "0"`) still work; their menu has **Use this camera by name instead of index**.
+
+`camwatch doctor` lists the USB cameras it can see, with their names and largest resolution.
+
 ### Dashboard keys
 
 | Key | Action |
@@ -137,7 +148,7 @@ Logs are written to `data/logs/camwatch.log` (rotated), every event to `data/eve
 
 | Symptom | Setting |
 |---|---|
-| USB webcam stuck at 640×360 / 640×480 on Windows | Menu → Cameras → *camera* → **Resolution** (e.g. 1920x1080). If it still doesn't change, try **Pixel format / capture backend** → MJPG, or backend msmf. The Cameras table shows `640x360 (asked 1920x1080)` when the camera ignores the request |
+| USB webcam stuck at 640×360 / 640×480 | Menu → Cameras → *camera* → **Resolution**. It lists the sizes the camera supports, then tries the capture setups (MJPG/YUY2, DirectShow/Media Foundation or V4L2) until one really delivers that size, and saves it. The Cameras table shows `640x360 (asked 1920x1080)` when the camera ignores the request |
 | USB webcam stuck at ~5 fps at 1080p | Menu → Cameras → *camera* → **Frame rate** → 30 fps (or `fps: 30` under the camera in `config.yaml`). The log line `USB camera opened: 1920x1080 MJPG @ 30 fps` shows what the camera accepted. A warning after 5 s means frames still arrive slowly. If the format shown is YUY2, set **Pixel format** → MJPG or try backend msmf; if it's MJPG, the room is probably too dim |
 | Alerts for people on the street far away | Raise `detection.person_min_height` (e.g. 0.25) |
 | Wrong name assigned | Move the wrong photos to the right person's folder (or delete them), then Settings → *Rebuild face database*. Raise `face.match_threshold` (0.4–0.45) and enroll more varied samples |

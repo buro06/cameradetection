@@ -95,7 +95,7 @@ def cmd_run(args, console: Console) -> int:
 def cmd_setup(args, console: Console) -> int:
     import questionary
 
-    from .menus import add_camera_flow, telegram_menu
+    from .menus import ADD_OTHER, ADD_USB, add_camera_flow, add_usb_flow, telegram_menu
 
     path = Path(args.config)
     cfg = load_config(path)
@@ -106,7 +106,11 @@ def cmd_setup(args, console: Console) -> int:
     if questionary.confirm("Configure Telegram notifications now?", default=not cfg.telegram_token()).ask():
         telegram_menu(cfg, console)
     while questionary.confirm("Add a camera?", default=not cfg.cameras).ask():
-        add_camera_flow(cfg, console)
+        kind = questionary.select("What kind?", choices=[ADD_USB, ADD_OTHER]).ask()
+        if kind == ADD_USB:
+            add_usb_flow(cfg, console)
+        elif kind == ADD_OTHER:
+            add_camera_flow(cfg, console)
     cfg.save(path)
     console.print("\n[green]Setup saved.[/] Start monitoring with [b]camwatch[/] (interactive) or "
                   "[b]camwatch run --headless[/] (service). Enroll faces from the dashboard menu (press m).")
@@ -160,6 +164,12 @@ def cmd_doctor(args, console: Console) -> int:
             check("Telegram bot", False, str(e))
     else:
         console.print("[yellow]![/] Telegram disabled or no token")
+    from .usbcams import list_cameras
+    with console.status("Listing USB cameras …"):
+        usb = list_cameras()
+    console.print(f"  USB cameras found: {len(usb) or 'none (or this system cannot list them)'}")
+    for u in usb:
+        console.print(f"    [b]{u.source}[/] (index {u.index}){u.describe()[len(u.name):]}")
     if cfg.cameras:
         from .menus import probe_camera
         from .camera import describe_source, set_rtsp_transport

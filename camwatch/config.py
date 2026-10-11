@@ -18,16 +18,16 @@ DEFAULT_CONFIG_PATH = Path(os.environ.get("CAMWATCH_CONFIG", "config.yaml"))
 @dataclass
 class CameraConfig:
     name: str
-    source: str  # "0" (USB index), rtsp://..., http(s)://..., or a video file path
+    source: str  # "usb:<camera name>" or "0" (USB index), rtsp://..., http(s)://..., or a video file path
     enabled: bool = True
     # auto | stream | snapshot (poll a JPEG URL)
     mode: str = "auto"
-    # auto | dshow | msmf | ffmpeg | v4l2 | avfoundation  (USB cameras only use this)
+    # auto (dshow on Windows, v4l2 on Linux) | dshow | msmf | ffmpeg | v4l2 | avfoundation  (USB cameras only)
     backend: str = "auto"
     width: int = 0  # requested capture size for USB cameras (0 = driver default)
     height: int = 0
     fps: float = 0.0  # requested frame rate for USB cameras (0 = driver default)
-    # USB pixel format: auto (MJPG on Windows) | MJPG | YUY2 | none
+    # USB pixel format: auto (MJPG on Windows, and on Linux above 640x480) | MJPG | YUY2 | none
     fourcc: str = "auto"
     snapshot_fps: float = 2.0
 
