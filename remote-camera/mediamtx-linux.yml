@@ -1,0 +1,45 @@
+# MediaMTX config for camwatch: share a USB camera on this Linux PC as an RTSP stream.
+# camwatch reads it as rtsp://camwatch:<password>@<this-pc>:8554/cam1
+# Settings not listed here keep MediaMTX's defaults. See README.md in this folder.
+
+# Only RTSP over TCP is used (port 8554); the other servers are off so fewer ports are open.
+# (`moq` needs MediaMTX 1.19 or newer; delete that line for an older version.)
+rtspTransports: [tcp]
+rtmp: false
+hls: false
+webrtc: false
+srt: false
+moq: false
+
+authInternalUsers:
+  # ffmpeg on this PC sends the camera in.
+  - user: any
+    ips: ["127.0.0.1", "::1"]
+    permissions:
+      - action: publish
+  # camwatch watches with this user name and password. CHANGE THE PASSWORD.
+  - user: camwatch
+    pass: change-me
+    permissions:
+      - action: read
+
+paths:
+  cam1:
+    # Replace the /dev/v4l/by-id/... path with your camera's (`ls /dev/v4l/by-id/`, the one ending in
+    # -video-index0). That name stays the same when the camera is re-plugged, unlike /dev/videoN.
+    #
+    # 4K: -video_size 3840x2160 and -b:v 16M -maxrate 16M -bufsize 32M.
+    # Intel/AMD graphics can do the H.264 work instead of the CPU: replace everything from -c:v up to
+    # -pix_fmt yuv420p with
+    #   -vaapi_device /dev/dri/renderD128 -vf format=nv12,hwupload -c:v h264_vaapi -b:v 6M -maxrate 6M -g 30
+    runOnInit: >-
+      ffmpeg -hide_banner -loglevel error
+      -f v4l2 -input_format mjpeg -video_size 1920x1080 -framerate 15
+      -i /dev/v4l/by-id/usb-REPLACE_WITH_YOUR_CAMERA-video-index0
+      -c:v libx264 -preset veryfast -tune zerolatency -b:v 6M -maxrate 6M -bufsize 12M -g 30 -pix_fmt yuv420p
+      -f rtsp -rtsp_transport tcp rtsp://localhost:$RTSP_PORT/$MTX_PATH
+    # Start ffmpeg again (after 5 s) if it stops, e.g. when the camera is unplugged.
+    runOnInitRestart: true
+
+  # A second camera: copy cam1 as cam2 with the other camera's /dev/v4l/by-id path.
+  # camwatch then reads rtsp://camwatch:<password>@<this-pc>:8554/cam2

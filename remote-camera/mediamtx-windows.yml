@@ -1,0 +1,49 @@
+# MediaMTX config for camwatch: share a USB camera on this Windows PC as an RTSP stream.
+# camwatch reads it as rtsp://camwatch:<password>@<this-pc>:8554/cam1
+# Settings not listed here keep MediaMTX's defaults. See README.md in this folder.
+
+# Only RTSP over TCP is used (port 8554); the other servers are off so fewer ports are open.
+# (`moq` needs MediaMTX 1.19 or newer; delete that line for an older version.)
+rtspTransports: [tcp]
+rtmp: false
+hls: false
+webrtc: false
+srt: false
+moq: false
+
+authInternalUsers:
+  # ffmpeg on this PC sends the camera in.
+  - user: any
+    ips: ["127.0.0.1", "::1"]
+    permissions:
+      - action: publish
+  # camwatch watches with this user name and password. CHANGE THE PASSWORD.
+  - user: camwatch
+    pass: change-me
+    permissions:
+      - action: read
+
+paths:
+  cam1:
+    # Replace HD Pro Webcam C920 with your camera's name, from:
+    #   ffmpeg -hide_banner -list_devices true -f dshow -i dummy
+    # Keep the double quotes around "video=...". Two cameras with the same name: put
+    # -video_device_number 1 just before -i to pick the second one.
+    # If ffmpeg isn't on the PATH, give its full path in single quotes: 'C:\ffmpeg\bin\ffmpeg.exe'
+    #
+    # 4K: -video_size 3840x2160 and -b:v 16M -maxrate 16M -bufsize 32M.
+    # Intel graphics can do the H.264 work instead of the CPU: replace everything from -c:v up to
+    # -pix_fmt yuv420p with
+    #   -c:v h264_qsv -preset veryfast -b:v 6M -maxrate 6M -g 30 -pix_fmt nv12
+    # (AMD: -c:v h264_amf -b:v 6M -g 30 -pix_fmt nv12)
+    runOnInit: >-
+      ffmpeg -hide_banner -loglevel error
+      -f dshow -rtbufsize 100M -video_size 1920x1080 -framerate 15 -vcodec mjpeg
+      -i "video=HD Pro Webcam C920"
+      -c:v libx264 -preset veryfast -tune zerolatency -b:v 6M -maxrate 6M -bufsize 12M -g 30 -pix_fmt yuv420p
+      -f rtsp -rtsp_transport tcp rtsp://localhost:$RTSP_PORT/$MTX_PATH
+    # Start ffmpeg again (after 5 s) if it stops, e.g. when the camera is unplugged.
+    runOnInitRestart: true
+
+  # A second camera: copy cam1 as cam2 with the other camera's name.
+  # camwatch then reads rtsp://camwatch:<password>@<this-pc>:8554/cam2

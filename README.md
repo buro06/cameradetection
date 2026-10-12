@@ -78,6 +78,14 @@ The camera is saved by name (`source: "usb:Logitech BRIO"`), so it stays the sam
 
 `camwatch doctor` lists the USB cameras it can see, with their names and largest resolution.
 
+### Camera on another PC
+
+A USB camera can also be plugged into a cheaper PC (Linux or Windows, no graphics card needed) that streams it to the computer running camwatch.
+
+That PC runs only MediaMTX and ffmpeg. They compress the video and share it as a password-protected RTSP stream, which you add here as a network camera: `rtsp://camwatch:<password>@<small-pc>:8554/cam1`.
+
+[`remote-camera/`](remote-camera/README.md) has ready-made configs and step-by-step setup for both systems.
+
 ### Dashboard keys
 
 | Key | Action |

@@ -1,0 +1,17 @@
+# systemd service: start MediaMTX (and with it the camera stream) at boot, restart it if it stops.
+# Install: sudo cp mediamtx.service /etc/systemd/system/ && sudo systemctl enable --now mediamtx
+[Unit]
+Description=MediaMTX camera stream for camwatch
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/mediamtx /etc/mediamtx/mediamtx.yml
+Restart=always
+RestartSec=5
+# Runs as a throwaway system user that may only use the cameras (video) and graphics (render).
+DynamicUser=yes
+SupplementaryGroups=video render
+
+[Install]
+WantedBy=multi-user.target
