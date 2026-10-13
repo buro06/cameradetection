@@ -107,6 +107,22 @@ class Match:
     score: float
 
 
+def onnxruntime_cuda_hint() -> str:
+    """How to fix onnxruntime-gpu being built for another CUDA major version than torch, or "" if they match.
+    onnxruntime-gpu 1.27+ is CUDA 13 only, which drops Maxwell/Pascal/Volta GPUs (e.g. the Quadro M4000)."""
+    try:
+        import torch
+        from onnxruntime.capi import build_and_package_info as ort_build
+    except ImportError:
+        return ""
+    ort_cuda, torch_cuda = getattr(ort_build, "cuda_version", None), torch.version.cuda
+    if not ort_cuda or not torch_cuda or ort_cuda.split(".")[0] == torch_cuda.split(".")[0]:
+        return ""
+    fix = 'pip install "onnxruntime-gpu<1.27"' if torch_cuda.startswith("12.") else "install the onnxruntime-gpu build for it"
+    return (f"onnxruntime-gpu {getattr(ort_build, '__version__', '?')} is built for CUDA {ort_cuda.split('.')[0]} "
+            f"but torch uses CUDA {torch_cuda.split('.')[0]}: {fix}")
+
+
 def _sessions(paths: dict[str, Path], device: str):
     """onnxruntime sessions for detector and recognizer; GPU only if it actually runs (old GPUs may lack kernels)."""
     if device in ("auto", "cuda"):
@@ -135,9 +151,10 @@ def _sessions(paths: dict[str, Path], device: str):
                 det.run(None, {det.get_inputs()[0].name: np.zeros((1, 3, 320, 320), np.float32)})
                 rec.run(None, {rec.get_inputs()[0].name: np.zeros((1, 3, 112, 112), np.float32)})
                 return det, rec, "cuda"
-            log.warning("onnxruntime could not start CUDA for face models; using the CPU")
+            log.warning("onnxruntime could not start CUDA for face models; using the CPU. %s", onnxruntime_cuda_hint())
         except Exception as e:
-            log.warning("Face models can't run on the GPU (%s); using the CPU", str(e).splitlines()[0][:200])
+            log.warning("Face models can't run on the GPU (%s); using the CPU. %s", str(e).splitlines()[0][:200],
+                        onnxruntime_cuda_hint())
     elif device == "cuda":
         log.warning("onnxruntime has no CUDA support installed (pip install onnxruntime-gpu); using the CPU")
     cpu = ["CPUExecutionProvider"]

@@ -151,6 +151,10 @@ def cmd_doctor(args, console: Console) -> int:
         with console.status("Checking face models (first run downloads ~280 MB) …"):
             fe = FaceEngine(cfg.data_path / "models", cfg.face)
         check(f"Face models (InsightFace {cfg.face.model})", True, f"on {fe.device} · {cfg.data_path / 'models'}")
+        if fe.device == "cpu" and cfg.face.device != "cpu":
+            from .faces import onnxruntime_cuda_hint
+            if hint := onnxruntime_cuda_hint():
+                console.print(f"  [yellow]→ face models can't use the GPU: {hint}[/]", markup=True, highlight=False)
     except Exception as e:
         check(f"Face models (InsightFace {cfg.face.model})", False, str(e))
     token = cfg.telegram_token()

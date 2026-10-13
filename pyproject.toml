@@ -14,7 +14,8 @@ dependencies = [
     "ultralytics>=8.4",
     "opencv-python>=4.8",
     # face models (InsightFace buffalo_l); the GPU build falls back to the CPU on its own
-    "onnxruntime-gpu>=1.20; sys_platform != 'darwin'",
+    # 1.27+ is CUDA 13 only: no Maxwell/Pascal/Volta GPUs (Quadro M4000) and no match for torch cu126
+    "onnxruntime-gpu>=1.20,<1.27; sys_platform != 'darwin'",
     "onnxruntime>=1.20; sys_platform == 'darwin'",
     "numpy",
     "pyyaml",

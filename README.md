@@ -46,7 +46,7 @@ camwatch doctor
 
 `camwatch doctor` should report `CUDA — Quadro M4000 (sm_52)` and `detector device: cuda:0`. If it reports *"not supported by torch …"*, a CUDA 12.8+/13 build of torch was installed. Reinstall with the cu126 command above.
 
-The face models run on `onnxruntime-gpu`, which reuses torch's CUDA libraries. `camwatch doctor` shows whether they run `on cuda` or `on cpu`. If onnxruntime can't use the GPU, they fall back to the CPU by themselves; if that makes the dashboard's inference FPS drop, lower `face.check_fps` (face scans per second per camera while someone is in view).
+The face models run on `onnxruntime-gpu`, which reuses torch's CUDA libraries. Version 1.27 and later are built for CUDA 13 only, which doesn't support the M4000, so camwatch requires a version below 1.27. An install made before that limit was added can be fixed with `pip install "onnxruntime-gpu<1.27"`. `camwatch doctor` points this out when it happens. `camwatch doctor` shows whether they run `on cuda` or `on cpu`. If onnxruntime can't use the GPU, they fall back to the CPU by themselves; if that makes the dashboard's inference FPS drop, lower `face.check_fps` (face scans per second per camera while someone is in view).
 
 **Upgrading from YuNet + SFace:** on first start the face database is re-embedded from the photos in `data/faces/` and `data/unknown/` (this takes a moment and is logged). Anyone with no usable photo has to be enrolled again. `face.detector_score` and `face.match_threshold` are reset to the new models' defaults.
 
