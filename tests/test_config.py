@@ -1,3 +1,4 @@
+import pytest
 import yaml
 
 from camwatch.config import AppConfig, CameraConfig, load_config
@@ -64,3 +65,23 @@ def test_cooldown_and_leave_times_become_the_30s_away_rule(tmp_path, caplog):
     assert "events.cooldown_seconds" in caplog.text and "cameras.leave_seconds" in caplog.text
     cfg.save(path)
     assert "leave_seconds" not in path.read_text() and load_config(path).to_dict() == cfg.to_dict()
+
+
+def test_ntfy_section_round_trips_and_env_password_wins(tmp_path, monkeypatch):
+    cfg = AppConfig()
+    cfg.ntfy.enabled, cfg.ntfy.server, cfg.ntfy.topic = True, "https://ntfy.example", "cams"
+    cfg.ntfy.username, cfg.ntfy.password = "user", "from-file"
+    path = tmp_path / "config.yaml"
+    cfg.save(path)
+    loaded = load_config(path)
+    assert loaded.ntfy == cfg.ntfy
+    assert loaded.ntfy_password() == "from-file"
+    monkeypatch.setenv("CAMWATCH_NTFY_PASSWORD", "from-env")
+    assert loaded.ntfy_password() == "from-env"
+
+
+def test_unknown_ntfy_key_is_rejected(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text("ntfy:\n  tpoic: oops\n")
+    with pytest.raises(ValueError, match="tpoic"):
+        load_config(path)

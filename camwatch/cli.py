@@ -95,7 +95,7 @@ def cmd_run(args, console: Console) -> int:
 def cmd_setup(args, console: Console) -> int:
     import questionary
 
-    from .menus import ADD_OTHER, ADD_USB, add_camera_flow, add_usb_flow, telegram_menu
+    from .menus import ADD_OTHER, ADD_USB, add_camera_flow, add_usb_flow, ntfy_menu, telegram_menu
 
     path = Path(args.config)
     cfg = load_config(path)
@@ -105,6 +105,8 @@ def cmd_setup(args, console: Console) -> int:
     console.print(f"Config file: [b]{path.resolve()}[/]\n")
     if questionary.confirm("Configure Telegram notifications now?", default=not cfg.telegram_token()).ask():
         telegram_menu(cfg, console)
+    if questionary.confirm("Configure ntfy notifications now?", default=False).ask():
+        ntfy_menu(cfg, console)
     while questionary.confirm("Add a camera?", default=not cfg.cameras).ask():
         kind = questionary.select("What kind?", choices=[ADD_USB, ADD_OTHER]).ask()
         if kind == ADD_USB:
@@ -168,6 +170,16 @@ def cmd_doctor(args, console: Console) -> int:
             check("Telegram bot", False, str(e))
     else:
         console.print("[yellow]![/] Telegram disabled or no token")
+    if cfg.ntfy.enabled:
+        from .ntfy import check_login
+        try:
+            user = check_login(cfg.ntfy, cfg.ntfy_password())
+            check("ntfy login", True, f"{user} @ {cfg.ntfy.server}")
+            check("ntfy topic", bool(cfg.ntfy.topic), cfg.ntfy.topic or "none configured")
+        except Exception as e:
+            check("ntfy login", False, f"{cfg.ntfy.server}: {e}")
+    else:
+        console.print("[yellow]![/] ntfy disabled")
     from .usbcams import list_cameras
     with console.status("Listing USB cameras …"):
         usb = list_cameras()
@@ -192,15 +204,15 @@ def cmd_doctor(args, console: Console) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="camwatch", description="24/7 person & face detection with Telegram alerts")
+    p = argparse.ArgumentParser(prog="camwatch", description="24/7 person & face detection with Telegram/ntfy alerts")
     p.add_argument("--config", "-c", default=str(DEFAULT_CONFIG_PATH), help="config file (default: config.yaml)")
     p.add_argument("--verbose", "-v", action="store_true", help="debug logging")
     p.add_argument("--version", action="version", version=f"camwatch {__version__}")
     sub = p.add_subparsers(dest="command")
     run = sub.add_parser("run", help="start monitoring (default)")
     run.add_argument("--headless", action="store_true", help="no dashboard; log to stdout (for services)")
-    sub.add_parser("setup", help="interactive setup wizard (Telegram + cameras)")
-    sub.add_parser("doctor", help="check GPU, models, Telegram and cameras")
+    sub.add_parser("setup", help="interactive setup wizard (Telegram, ntfy, cameras)")
+    sub.add_parser("doctor", help="check GPU, models, Telegram, ntfy and cameras")
     args = p.parse_args(argv)
 
     console = Console()

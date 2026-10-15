@@ -1,13 +1,14 @@
 # camwatch
 
-24/7 multi-camera person and face detection with Telegram alerts.
+24/7 multi-camera person and face detection with Telegram and/or ntfy alerts.
 
 - **Cameras:** USB webcams, RTSP, HTTP(S) MJPEG/HLS streams, JPEG snapshot URLs, and video files (for testing). Any number of cameras can run at once.
 - **Person detection:** Ultralytics YOLO11, batched across all cameras on the GPU.
 - **Face recognition:** InsightFace **buffalo_l**: **SCRFD-10G** (detection) + **ArcFace R50** (recognition), run through onnxruntime (GPU if it works, otherwise CPU). The model weights are free for non-commercial use only, e.g. at home.
 - **Telegram alerts** include a 5-second H.264 clip, starting the moment the person is detected. The caption names everyone seen (🟢 trusted, 🟠 known, 🔴 unknown).
+- **ntfy alerts** (ntfy.sh or your own server) push the same text with the clip attached.
 - **Trusted people** don't trigger alerts. Unknown faces are saved so you can label them later from Telegram or the CLI.
-- **Hard cooldown:** each camera sends at most one Telegram alert per 30s (`telegram.min_alert_interval_seconds`); later ones are still clipped and logged as `rate-limited`.
+- **Hard cooldown:** each camera sends at most one alert (on any channel) per 30s (`telegram.min_alert_interval_seconds`); later ones are still clipped and logged as `rate-limited`.
 - **Interactive dashboard** with menus. A headless mode is available for running as a service.
 
 ## How alerts are decided
@@ -55,7 +56,7 @@ On macOS or Linux: `python -m venv .venv && . .venv/bin/activate && pip install 
 ## First run
 
 ```powershell
-camwatch setup      # Telegram bot + cameras wizard (writes config.yaml)
+camwatch setup      # Telegram bot, ntfy + cameras wizard (writes config.yaml)
 camwatch            # start monitoring with the live dashboard
 ```
 
@@ -66,6 +67,13 @@ camwatch            # start monitoring with the live dashboard
 4. Choose **Find chats & users**.
 
 Alerts go to `chat_ids`. Commands are accepted only from those chats or from `allowed_user_ids`; everything else is ignored and logged. To keep the token out of `config.yaml`, set it in the `CAMWATCH_TELEGRAM_TOKEN` environment variable instead.
+
+**ntfy:** Menu → **ntfy** (or the setup wizard) asks for the server URL, the topic and, if your server uses access control, a username and password. The login is checked before it's saved. Then choose **Send test message**. Subscribe to the topic in the ntfy app on your phone.
+
+- Each alert is titled with the camera and time. The body lists everyone seen (🟢 trusted, 🟠 known, 🔴 unknown), and the clip is attached (`ntfy.attach_clip`).
+- A self-hosted server only accepts the clip if `attachment-cache-dir` is set in its `server.yml`. Its default size limit is 15 MB. If the server refuses the clip, the alert is sent as text with the reason.
+- `ntfy.priority` sets the notification priority, from 1 (min) to 5 (urgent). The default is 4 (high).
+- To keep the password out of `config.yaml`, set it in the `CAMWATCH_NTFY_PASSWORD` environment variable. For NSSM, use `AppEnvironmentExtra`; for systemd on Linux, use `Environment=` in the unit.
 
 ### USB cameras
 
@@ -137,7 +145,7 @@ After camwatch exits, the watcher waits 10 s before restarting. Press `R` to res
 ```powershell
 nssm install camwatch "C:\camwatch\.venv\Scripts\camwatch.exe" "--config C:\camwatch\config.yaml run --headless"
 nssm set camwatch AppDirectory C:\camwatch
-nssm set camwatch AppEnvironmentExtra CAMWATCH_TELEGRAM_TOKEN=123456:ABC...
+nssm set camwatch AppEnvironmentExtra CAMWATCH_TELEGRAM_TOKEN=123456:ABC... CAMWATCH_NTFY_PASSWORD=...
 nssm start camwatch
 ```
 
@@ -166,7 +174,7 @@ Logs are written to `data/logs/camwatch.log` (rotated), every event to `data/eve
 | Brief false detections become "Person (face not visible)" alerts | Raise `events.arrive_seconds` (e.g. 3) or `detection.confidence` |
 | Same person alerts again after stepping out | Raise `events.away_seconds` (e.g. 60) |
 | Passers-by outdoors are merged into one alert | Lower `events.away_seconds` (e.g. 10) |
-| Too many Telegram alerts | Raise `telegram.min_alert_interval_seconds` |
+| Too many alerts (Telegram or ntfy) | Raise `telegram.min_alert_interval_seconds` (applies to every channel) |
 | Faraway faces aren't recognised | Lower `face.min_face_px` (e.g. 30), or move the camera closer |
 | Det/s on the dashboard below `detection.detect_fps` (slow PC, no GPU) | `detection.model: yolo11n.pt`, `detection.imgsz: 480`, `detection.detect_fps: 3`, and `face.check_fps: 1`. Faces are only scanned while someone is in view, so an empty scene costs YOLO alone |
 

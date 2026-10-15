@@ -21,6 +21,7 @@ def eng(cfg, monkeypatch, tmp_path):
     e = Engine.__new__(Engine)  # just the alert path, no cameras or models
     e.cfg, e.data, e.clips_dir = cfg, tmp_path, tmp_path / "clips"
     e.events, e._alerts, e._limiter, e.bot = deque(maxlen=100), queue.Queue(), engine_mod.AlertLimiter(), FakeBot()
+    e.ntfy = None
     clips = []
     monkeypatch.setattr(engine_mod, "write_clip", lambda result, path, _cfg: clips.append(result.camera) or path)
     e.clips = clips
@@ -63,3 +64,21 @@ def test_non_alert_decisions_are_untouched(eng, monkeypatch):
     trusted = result("door", "trusted")
     deliver(eng, 101.0, monkeypatch, trusted)
     assert trusted.decision == "trusted" and eng.clips == ["door"]
+
+
+class BrokenBot(FakeBot):
+    def send_alert(self, result, clip):
+        raise RuntimeError("boom")
+
+
+def test_every_channel_gets_the_alert_and_rate_limited_ones_reach_none(eng, monkeypatch):
+    eng.ntfy = FakeBot()
+    deliver(eng, 100.0, monkeypatch, result("door"))
+    deliver(eng, 105.0, monkeypatch, result("door"))  # rate-limited
+    assert eng.bot.sent == eng.ntfy.sent == ["door"]
+
+
+def test_a_failing_channel_does_not_stop_the_others(eng, monkeypatch):
+    eng.bot, eng.ntfy = BrokenBot(), FakeBot()
+    deliver(eng, 100.0, monkeypatch, result("door"))
+    assert eng.ntfy.sent == ["door"]

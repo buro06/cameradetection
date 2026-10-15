@@ -10,6 +10,7 @@ from collections import deque
 from rich.console import Console
 from rich.layout import Layout
 from rich.live import Live
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -99,6 +100,10 @@ def render(engine: Engine, logs: LogBuffer, height: int) -> Layout:
                            f"  ·  detector {engine.detector.device}  ·  faces {len(engine.db.list_persons())} known, "
                            f"{len(engine.db.list_unknowns())} unknown  ·  telegram ")
     header.append_text(Text.from_markup(tg))
+    nf = "off"
+    if engine.ntfy:
+        nf = "ok" if engine.ntfy.ok else f"[red]error: {escape(engine.ntfy.last_error[:40])}[/]"
+    header.append_text(Text.from_markup(f"  ·  ntfy {nf}"))
 
     cams = Table(expand=True, box=None, header_style="bold", pad_edge=False)
     for col, kw in [("Camera", {}), ("Status", {}), ("Res", {}), ("FPS", {"justify": "right"}),

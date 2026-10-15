@@ -93,6 +93,17 @@ class TelegramConfig:
 
 
 @dataclass
+class NtfyConfig:
+    enabled: bool = False
+    server: str = "https://ntfy.sh"
+    topic: str = ""
+    username: str = ""
+    password: str = ""  # or env CAMWATCH_NTFY_PASSWORD (preferred)
+    priority: int = 4  # 1 (min) … 5 (max/urgent)
+    attach_clip: bool = True  # falls back to text only if the server rejects the clip
+
+
+@dataclass
 class AppConfig:
     data_dir: str = "data"
     rtsp_transport: str = "tcp"
@@ -101,6 +112,7 @@ class AppConfig:
     events: EventConfig = field(default_factory=EventConfig)
     clip: ClipConfig = field(default_factory=ClipConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
+    ntfy: NtfyConfig = field(default_factory=NtfyConfig)
     cameras: list[CameraConfig] = field(default_factory=list)
 
     # not serialized
@@ -116,6 +128,9 @@ class AppConfig:
 
     def telegram_token(self) -> str:
         return os.environ.get("CAMWATCH_TELEGRAM_TOKEN") or self.telegram.bot_token
+
+    def ntfy_password(self) -> str:
+        return os.environ.get("CAMWATCH_NTFY_PASSWORD") or self.ntfy.password
 
     def camera(self, name: str) -> CameraConfig | None:
         for c in self.cameras:
@@ -262,6 +277,7 @@ def load_config(path: Path | str = DEFAULT_CONFIG_PATH) -> AppConfig:
         events=_build(EventConfig, raw.get("events")),
         clip=_build(ClipConfig, raw.get("clip")),
         telegram=_build(TelegramConfig, raw.get("telegram")),
+        ntfy=_build(NtfyConfig, raw.get("ntfy")),
         cameras=[_build(CameraConfig, {**c, "source": str(c.get("source", ""))}) for c in raw.get("cameras") or []],
     )
     cfg._path = path

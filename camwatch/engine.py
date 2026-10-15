@@ -36,7 +36,7 @@ class EventLogEntry:
 
 
 class AlertLimiter:
-    """Hard per-camera cooldown for Telegram: at most one alert per `interval` seconds on each camera."""
+    """Hard per-camera cooldown for all alert channels: at most one alert per `interval` seconds on each camera."""
 
     def __init__(self):
         self._last: dict[str, float] = {}
@@ -80,6 +80,10 @@ class Engine:
         if cfg.telegram.enabled and cfg.telegram_token():
             from .telegram import TelegramBot
             self.bot = TelegramBot(self)
+        self.ntfy = None
+        if cfg.ntfy.enabled and cfg.ntfy.topic:
+            from .ntfy import NtfyNotifier
+            self.ntfy = NtfyNotifier(self)
 
     # ---- lifecycle -------------------------------------------------------------
     def start(self) -> None:
@@ -93,6 +97,8 @@ class Engine:
             t.start()
         if self.bot:
             self.bot.start()
+        if self.ntfy:
+            self.ntfy.start()
         log.info("camwatch started: %d camera(s), detector on %s", len(self.streams), self.detector.device)
 
     def stop(self, say: Callable[[str], None] = lambda msg: None, timeout: float = 5.0) -> None:
@@ -102,6 +108,8 @@ class Engine:
         if self.bot:
             say("stopping Telegram bot")
             self.bot.stop()
+        if self.ntfy:
+            self.ntfy.stop()
         with self._cam_lock:
             streams = list(self.streams.values())
         for s in streams:
@@ -151,6 +159,17 @@ class Engine:
         elif self.bot is not None:
             self.bot.stop()
             self.bot = None
+
+    def apply_ntfy(self) -> None:
+        """Pick up ntfy config changes made at runtime (credentials and topic are read on every send)."""
+        if self.cfg.ntfy.enabled and self.cfg.ntfy.topic:
+            if self.ntfy is None:
+                from .ntfy import NtfyNotifier
+                self.ntfy = NtfyNotifier(self)
+                self.ntfy.start()
+        elif self.ntfy is not None:
+            self.ntfy.stop()
+            self.ntfy = None
 
     # ---- arming ------------------------------------------------------------------
     def is_armed(self, camera: str) -> bool:
@@ -270,8 +289,13 @@ class Engine:
         except Exception:
             log.exception("[%s] clip encoding failed", result.camera)
         self._append_event_log(entry)
-        if self.bot and result.decision == "alert":
-            self.bot.send_alert(result, path)
+        if result.decision == "alert":
+            for notifier in (self.bot, self.ntfy):
+                if notifier:
+                    try:
+                        notifier.send_alert(result, path)
+                    except Exception:
+                        log.exception("[%s] alert delivery failed", result.camera)
         result.frames = []  # free memory
 
     def _housekeeping_loop(self) -> None:

@@ -47,7 +47,16 @@ telegram:
   chat_ids: []            # chats that receive alerts (use `camwatch setup` to discover)
   allowed_user_ids: []    # users allowed to send commands from any chat
   send_unknown_faces: true
-  min_alert_interval_seconds: 30  # hard cooldown per camera: later alerts are clipped + logged, not sent
+  min_alert_interval_seconds: 30  # hard cooldown per camera, all channels: later alerts are clipped + logged, not sent
+
+ntfy:
+  enabled: false
+  server: https://ntfy.sh  # or your own server
+  topic: ""               # alerts are published to <server>/<topic>
+  username: ""            # empty = anonymous
+  password: ""            # or set env var CAMWATCH_NTFY_PASSWORD (preferred)
+  priority: 4             # 1 (min) … 5 (urgent)
+  attach_clip: true       # sent as text only if the server refuses the clip
 
 cameras:
   - name: front-door

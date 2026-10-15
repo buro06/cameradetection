@@ -8,7 +8,7 @@ import re
 import subprocess
 import sys
 import time
-from dataclasses import fields
+from dataclasses import fields, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -131,6 +131,7 @@ def main_menu(engine: Engine, console: Console) -> str | None:
             f"❓  Review unknown faces ({n_unknown})",
             "🔔  Arm / disarm alerts",
             "✉️   Telegram",
+            "📣  ntfy",
             "⚙️   Settings",
             "📸  Save snapshots of all cameras",
             BACK,
@@ -153,6 +154,8 @@ def main_menu(engine: Engine, console: Console) -> str | None:
                 arm_menu(engine)
             elif "Telegram" in choice:
                 telegram_menu(engine.cfg, console, engine)
+            elif "ntfy" in choice:
+                ntfy_menu(engine.cfg, console, engine)
             elif "Settings" in choice:
                 settings_menu(engine, console)
             elif "snapshots" in choice:
@@ -779,6 +782,60 @@ def telegram_menu(cfg: AppConfig, console: Console, engine: Engine | None = None
             _pause()
 
 
+# ---- ntfy -----------------------------------------------------------------------------------
+def ntfy_menu(cfg: AppConfig, console: Console, engine: Engine | None = None) -> None:
+    import requests
+
+    from .ntfy import NtfyError, check_login, publish
+
+    nf = cfg.ntfy
+    while True:
+        console.clear()
+        password = cfg.ntfy_password()
+        console.print(f"Enabled: [b]{nf.enabled}[/]   Server: {nf.server}   Topic: {nf.topic or '[red]not set[/]'}\n"
+                      f"User: {nf.username or 'anonymous'}   Password: {'set' if password else 'not set'}"
+                      f"{' (from env CAMWATCH_NTFY_PASSWORD)' if os.environ.get('CAMWATCH_NTFY_PASSWORD') else ''}")
+        choice = _select("ntfy:", ["🌐  Set server & topic", "🔑  Set username & password", "📨  Send test message",
+                                   "⏯   Disable" if nf.enabled else "⏯   Enable", BACK])
+        if choice is None or choice == BACK:
+            return
+        try:
+            if "server" in choice:
+                server = _text("Server URL:", default=nf.server)
+                topic = _text("Topic:", default=nf.topic or "camwatch")
+                if server:
+                    nf.server = server.strip().rstrip("/")
+                if topic:
+                    nf.topic = topic.strip()
+                    nf.enabled = True
+            elif "username" in choice:
+                user = _text("Username (empty = anonymous):", default=nf.username)
+                if user is None:
+                    continue
+                user = user.strip()
+                new = (questionary.password("Password (empty = keep current):").ask() or "") if user else ""
+                with console.status("Checking login …"):
+                    name = check_login(replace(nf, username=user), (new or password) if user else "")
+                nf.username = user
+                if new or not user:
+                    nf.password = new
+                console.print(f"[green]Login OK[/] — signed in as {name}.")
+                _pause()
+            elif "test" in choice:
+                with console.status("Sending …"):
+                    publish(nf, password, "✅ camwatch test message", title="camwatch")
+                console.print(f"[green]Sent to {nf.server}/{nf.topic}.[/]")
+                _pause()
+            else:
+                nf.enabled = not nf.enabled
+            cfg.save()
+            if engine:
+                engine.apply_ntfy()
+        except (NtfyError, requests.RequestException, ValueError) as e:
+            console.print(f"[red]{e}[/]")
+            _pause()
+
+
 # ---- settings -----------------------------------------------------------------------------
 SETTINGS = [
     ("detection", "confidence", "YOLO person confidence (0–1)"),
@@ -798,7 +855,9 @@ SETTINGS = [
     ("clip", "annotate", "Draw boxes and names on clips"),
     ("clip", "retention_days", "Delete saved clips after N days (0 = keep)"),
     ("telegram", "send_unknown_faces", "Send unknown face photos for labeling"),
-    ("telegram", "min_alert_interval_seconds", "Hard cooldown: at most one Telegram alert per camera per (s)"),
+    ("telegram", "min_alert_interval_seconds", "Hard cooldown: at most one alert (any channel) per camera per (s)"),
+    ("ntfy", "priority", "ntfy alert priority (1 min … 5 urgent)"),
+    ("ntfy", "attach_clip", "Attach the clip to ntfy alerts"),
     ("detection", "model", "YOLO model (restart needed)"),
     ("detection", "device", "Device auto/cuda:0/cpu (restart needed)"),
     ("face", "device", "Face model device auto/cuda/cpu (restart needed)"),

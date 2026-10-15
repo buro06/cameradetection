@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "camwatch"
 version = "0.1.0"
-description = "24/7 multi-camera person & face detection with Telegram alerts"
+description = "24/7 multi-camera person & face detection with Telegram/ntfy alerts"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "AGPL-3.0-or-later" }  # inherits Ultralytics' AGPL-3.0
