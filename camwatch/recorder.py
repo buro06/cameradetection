@@ -13,6 +13,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from .camera import BufferedFrame
 from .config import ClipConfig
 from .events import EventResult
 from .timefmt import stamp
@@ -61,6 +62,30 @@ def draw_stamp(img: np.ndarray, text: str) -> None:
     cv2.putText(img, text, (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, WHITE, 2, cv2.LINE_AA)
 
 
+def annotate(img: np.ndarray, frame: BufferedFrame, result: EventResult, labels: dict[int, str], wall: float) -> np.ndarray:
+    """A copy of `img` with the frame's boxes and the camera/time stamp drawn on."""
+    img = img.copy()
+    if frame.overlay:
+        draw_boxes(img, frame.overlay.boxes, labels, frame.scale)
+    draw_stamp(img, f"{result.camera}  {stamp(wall)}")
+    return img
+
+
+def snapshot_jpeg(result: EventResult, cfg: ClipConfig, quality: int = 85) -> bytes | None:
+    """The event frame showing the most identified people (the latest such frame), as a JPEG."""
+    if not result.frames:
+        return None
+    labels = result.labels
+
+    def identified(f: BufferedFrame) -> int:
+        return sum(tid in labels for tid, _ in f.overlay.boxes) if f.overlay else 0
+
+    f = max(result.frames, key=lambda f: (identified(f), f.ts))
+    img = annotate(f.image, f, result, labels, result.wall_time + (f.ts - result.anchor)) if cfg.annotate else f.image
+    ok, jpg = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    return jpg.tobytes() if ok else None
+
+
 def write_clip(result: EventResult, path: Path, cfg: ClipConfig) -> Path:
     frames = sorted(result.frames, key=lambda f: f.ts)
     if not frames:
@@ -85,11 +110,7 @@ def write_clip(result: EventResult, path: Path, cfg: ClipConfig) -> Path:
             f = frames[max(0, bisect.bisect_right(stamps, t) - 1)]
             img = f.image if f.image.shape[:2] == (h, w) else cv2.resize(f.image, (w, h))
             if cfg.annotate:
-                img = img.copy()
-                if f.overlay:
-                    draw_boxes(img, f.overlay.boxes, labels, f.scale)
-                wall = result.wall_time + (t - result.anchor)
-                draw_stamp(img, f"{result.camera}  {stamp(wall)}")
+                img = annotate(img, f, result, labels, result.wall_time + (t - result.anchor))
             proc.stdin.write(np.ascontiguousarray(img).tobytes())
         proc.stdin.close()
         err = proc.stderr.read().decode(errors="replace")

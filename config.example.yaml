@@ -56,7 +56,8 @@ ntfy:
   username: ""            # empty = anonymous
   password: ""            # or set env var CAMWATCH_NTFY_PASSWORD (preferred)
   priority: 4             # 1 (min) … 5 (urgent)
-  attach_clip: true       # sent as text only if the server refuses the clip
+  attach_clip: true       # alerts show a snapshot; upload the clip too and link it (tap → plays)
+  clip_topic: ""          # clips are uploaded here; don't subscribe to it (empty = <topic>-clips)
 
 cameras:
   - name: front-door

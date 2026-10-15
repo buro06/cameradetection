@@ -1,8 +1,12 @@
+import numpy as np
 import pytest
 
 from camwatch import ntfy
+from camwatch.camera import BufferedFrame
 from camwatch.events import EventResult, PersonInfo
 from camwatch.ntfy import NtfyError, NtfyNotifier
+
+CLIP_URL = "https://ntfy.example/file/m1.mp4"
 
 
 class FakeResponse:
@@ -16,7 +20,8 @@ class FakeResponse:
 
 @pytest.fixture
 def http(monkeypatch):
-    """Records requests; `http.responses` is a list of statuses (or FakeResponses) served in order, then 200."""
+    """Records requests; `http.responses` is a list of statuses (or FakeResponses) served in order, then 200.
+    A 200 answers like ntfy: message id m<n>, and an attachment URL when a file was uploaded."""
     class Http:
         calls = []
         responses = []
@@ -25,7 +30,14 @@ def http(monkeypatch):
             body = data.read() if hasattr(data, "read") else data
             self.calls.append({"method": method, "url": url, "body": body, **kw})
             r = self.responses.pop(0) if self.responses else 200
-            return r if isinstance(r, FakeResponse) else FakeResponse(r, {"error": "attachment too large"})
+            if isinstance(r, FakeResponse):
+                return r
+            if r != 200:
+                return FakeResponse(r, {"error": "attachment too large"})
+            n = len(self.calls)
+            filename = (kw.get("params") or {}).get("filename")
+            att = {"attachment": {"url": f"https://ntfy.example/file/m{n}.{filename.rsplit('.', 1)[-1]}"}} if filename else {}
+            return FakeResponse(200, {"id": f"m{n}", **att})
 
     h = Http()
     for method in ("put", "post", "get"):
@@ -44,61 +56,84 @@ def notifier(cfg, monkeypatch):
     return n
 
 
-def alert(people=()):
-    return EventResult("Front door", 1_700_000_000.0, "alert", list(people), [], 0.0, 5.0, 0.0)
+@pytest.fixture
+def clip(tmp_path):
+    p = tmp_path / "door.mp4"
+    p.write_bytes(b"mp4data")
+    return p
+
+
+def alert(people=(), frames=True):
+    fr = [BufferedFrame(1.0, np.zeros((48, 64, 3), np.uint8), 1.0, None)] if frames else []
+    return EventResult("Front door", 1_700_000_000.0, "alert", list(people), fr, 0.0, 5.0, 0.0)
 
 
 def person(name=None, trusted=False, unknown_id=None):
     return PersonInfo(1, name, trusted, name or "u", unknown_id, None)
 
 
-def test_alert_uploads_clip_with_metadata_and_basic_auth(notifier, http, tmp_path):
-    clip = tmp_path / "door.mp4"
-    clip.write_bytes(b"mp4data")
+def summary(http):
+    return [(c["method"], (c.get("params") or {}).get("filename")) for c in http.calls]
+
+
+def test_alert_is_one_message_with_snapshot_linking_the_clip(notifier, http, clip):
     notifier.send_alert(alert([person("Alice"), person(unknown_id=7)]), clip)
-    (call,) = http.calls
-    assert call["method"] == "PUT" and call["url"] == "https://ntfy.example/camwatch"
-    assert call["auth"] == ("camuser", "secret") and call["body"] == b"mp4data"
-    p = call["params"]
-    assert p["title"].startswith("Front door — ") and p["filename"] == "door.mp4"
-    assert p["message"] == "🟠 Alice\n🔴 Unknown #7"
+    assert summary(http) == [("PUT", "door.mp4"), ("PUT", "snapshot.jpg")]
+    up, snap = http.calls
+    assert up["url"] == "https://ntfy.example/camwatch-clips" and up["body"] == b"mp4data"
+    assert snap["url"] == "https://ntfy.example/camwatch"
+    assert up["params"]["priority"] == 1 and up["auth"] == ("camuser", "secret")
+    p = snap["params"]
+    assert snap["body"][:2] == b"\xff\xd8"  # JPEG
+    assert p["title"].startswith("Front door — ") and p["message"] == "🟠 Alice\n🔴 Unknown #7"
     assert (p["tags"], p["priority"]) == ("rotating_light", 4)
+    assert p["click"] == CLIP_URL and p["actions"] == f"view, ▶ Play clip, {CLIP_URL}"
 
 
-def test_alert_without_clip_posts_text(notifier, http):
-    notifier.send_alert(alert(), None)
-    (call,) = http.calls
-    assert call["method"] == "POST" and call["body"] == "nobody identified".encode()
-    assert "filename" not in call["params"] and "message" not in call["params"]
+def test_clip_topic_can_be_configured(notifier, http, clip):
+    notifier.cfg.ntfy.clip_topic = "hidden"
+    notifier.send_alert(alert(), clip)
+    assert http.calls[0]["url"] == "https://ntfy.example/hidden"
 
 
-def test_attach_clip_off_sends_text_only(notifier, http, tmp_path):
-    clip = tmp_path / "door.mp4"
-    clip.write_bytes(b"x")
+@pytest.mark.parametrize("status", [413, 403])  # too large, or no write access to the clips topic
+def test_rejected_clip_still_sends_the_snapshot_alert(notifier, http, clip, status):
+    http.responses = [status]
+    notifier.send_alert(alert(), clip)
+    assert summary(http) == [("PUT", "door.mp4"), ("PUT", "snapshot.jpg")]
+    p = http.calls[1]["params"]
+    assert "click" not in p and "clip not attached" in p["message"]
+    assert notifier.ok
+
+
+def test_without_frames_the_alert_is_text_with_the_clip_link(notifier, http, clip):
+    notifier.send_alert(alert(frames=False), clip)
+    assert summary(http) == [("PUT", "door.mp4"), ("POST", None)]
+    assert http.calls[1]["body"] == "nobody identified".encode() and http.calls[1]["params"]["click"] == CLIP_URL
+
+
+def test_attach_clip_off_sends_only_the_snapshot(notifier, http, clip):
     notifier.cfg.ntfy.attach_clip = False
     notifier.send_alert(alert(), clip)
-    assert [c["method"] for c in http.calls] == ["POST"]
+    assert summary(http) == [("PUT", "snapshot.jpg")]
+    assert "click" not in http.calls[0]["params"]
 
 
-def test_rejected_clip_falls_back_to_text(notifier, http, tmp_path):
-    clip = tmp_path / "door.mp4"
-    clip.write_bytes(b"x")
+def test_rejected_snapshot_falls_back_to_text(notifier, http):
     http.responses = [413]
-    notifier.send_alert(alert(), clip)
-    assert [c["method"] for c in http.calls] == ["PUT", "POST"]
-    assert b"clip not attached" in http.calls[1]["body"]
-    assert notifier.ok
+    notifier.send_alert(alert(), None)
+    assert summary(http) == [("PUT", "snapshot.jpg"), ("POST", None)]
 
 
 def test_auth_failure_is_not_retried(notifier, http):
     http.responses = [401]
-    notifier.send_alert(alert(), None)
+    notifier.send_alert(alert(frames=False), None)
     assert len(http.calls) == 1 and not notifier.ok and "401" in notifier.last_error
 
 
 def test_server_errors_are_retried(notifier, http):
     http.responses = [503, 503]
-    notifier.send_alert(alert(), None)
+    notifier.send_alert(alert(frames=False), None)
     assert len(http.calls) == 3 and notifier.ok
 
 

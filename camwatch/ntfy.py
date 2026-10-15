@@ -1,4 +1,5 @@
-"""ntfy (https://ntfy.sh or self-hosted) alert delivery: a push notification per alert, with the clip attached."""
+"""ntfy (https://ntfy.sh or self-hosted) alert delivery: a push notification per alert with an inline snapshot
+and a link that plays the clip."""
 
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ import requests
 
 from .config import NtfyConfig
 from .events import EventResult
+from .recorder import snapshot_jpeg
 from .timefmt import clock
 
 if TYPE_CHECKING:
@@ -22,6 +24,9 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 ALERT_TAGS = "rotating_light"  # shown as 🚨
+# A message carries one attachment and only images preview inline (iOS), so the alert carries the snapshot
+# and links the clip, which is uploaded to a topic nobody subscribes to (`NtfyConfig.clips_topic`) to get a URL.
+CLIP_TAGS = "film_strip"
 
 
 class NtfyError(RuntimeError):
@@ -44,22 +49,37 @@ def _raise_for(r: requests.Response) -> None:
     raise NtfyError(f"HTTP {r.status_code}: {str(detail).strip()[:200]}", status=r.status_code)
 
 
-def publish(cfg: NtfyConfig, password: str, message: str, *, title: str | None = None, tags: str | None = None,
-            priority: int | None = None, attachment: Path | None = None, http_timeout: float = 30) -> None:
-    """Publish one message to the configured topic. Metadata goes in query parameters, which (unlike
-    headers) carry UTF-8 safely; with `attachment` the file is the request body."""
+def _topic_url(cfg: NtfyConfig, topic: str | None = None) -> str:
     if not cfg.topic:
         raise NtfyError("no topic configured")
-    url = f"{cfg.server.rstrip('/')}/{cfg.topic}"
-    params = {k: v for k, v in {"title": title, "tags": tags, "priority": priority}.items() if v is not None}
-    if attachment is not None:
-        params.update(message=message, filename=attachment.name)
+    return f"{cfg.server.rstrip('/')}/{topic or cfg.topic}"
+
+
+def publish(cfg: NtfyConfig, password: str, message: str, *, title: str | None = None, tags: str | None = None,
+            priority: int | None = None, attachment: Path | bytes | None = None, filename: str | None = None,
+            click: str | None = None, actions: str | None = None, topic: str | None = None,
+            http_timeout: float = 30) -> dict:
+    """Publish one message to `topic` (default: the configured one) and return the server's JSON (`id`,
+    `attachment.url`, …). Metadata goes in query parameters, which (unlike headers) carry UTF-8 safely;
+    an attachment is the body."""
+    url = _topic_url(cfg, topic)
+    params = {k: v for k, v in {"title": title, "tags": tags, "priority": priority, "click": click,
+                                "actions": actions}.items() if v is not None}
+    auth = _auth(cfg, password)
+    if isinstance(attachment, Path):
+        params.update(message=message, filename=filename or attachment.name)
         with open(attachment, "rb") as f:
-            r = requests.put(url, data=f, params=params, auth=_auth(cfg, password), timeout=http_timeout)
+            r = requests.put(url, data=f, params=params, auth=auth, timeout=http_timeout)
+    elif attachment is not None:
+        params.update(message=message, filename=filename or "attachment")
+        r = requests.put(url, data=attachment, params=params, auth=auth, timeout=http_timeout)
     else:
-        r = requests.post(url, data=message.encode("utf-8"), params=params, auth=_auth(cfg, password),
-                          timeout=http_timeout)
+        r = requests.post(url, data=message.encode("utf-8"), params=params, auth=auth, timeout=http_timeout)
     _raise_for(r)
+    try:
+        return r.json()
+    except ValueError:
+        return {}
 
 
 def check_login(cfg: NtfyConfig, password: str) -> str:
@@ -95,8 +115,8 @@ class NtfyNotifier:
     def stop(self) -> None:
         self._halt.set()
 
-    def publish(self, message: str, **kw) -> None:
-        publish(self.cfg.ntfy, self.cfg.ntfy_password(), message, **kw)
+    def publish(self, message: str, **kw) -> dict:
+        return publish(self.cfg.ntfy, self.cfg.ntfy_password(), message, **kw)
 
     # ---- outgoing -------------------------------------------------------------
     def _enqueue(self, fn, *args) -> None:
@@ -138,23 +158,44 @@ class NtfyNotifier:
         self._enqueue(lambda: self.publish(text, title=title))
 
     def send_alert(self, result: EventResult, clip: Path | None) -> None:
+        """Runs on the alerts thread while `result.frames` still exist: render the snapshot, queue the rest."""
         when = datetime.fromtimestamp(result.wall_time)
         title = f"{result.camera} — {clock(when)} ({when:%a %d %b})"
         lines = [f"{'🟢' if p.trusted else ('🟠' if p.name else '🔴')} {p.scored_label}" for p in result.people]
         message = "\n".join(lines) or "nobody identified"
         if not (self.cfg.ntfy.attach_clip and clip is not None and clip.exists()):
             clip = None
-        self._enqueue(self._send_alert, message, title, clip)
+        try:
+            snap = snapshot_jpeg(result, self.cfg.clip)
+        except Exception:
+            log.exception("[%s] snapshot for ntfy failed", result.camera)
+            snap = None
+        self._enqueue(self._send_alert, message, title, snap, clip)
 
-    def _send_alert(self, message: str, title: str, clip: Path | None) -> None:
-        kw = dict(title=title, tags=ALERT_TAGS, priority=self.cfg.ntfy.priority)
+    def _send_alert(self, message: str, title: str, snap: bytes | None, clip: Path | None) -> None:
+        clip_url = None
         if clip is not None:
             try:
-                self.publish(message, attachment=clip, **kw)
-                return
+                resp = self.publish(title, attachment=clip, title="clip", tags=CLIP_TAGS, priority=1,
+                                    topic=self.cfg.ntfy.clips_topic)
+                clip_url = (resp.get("attachment") or {}).get("url")
+            except NtfyError as e:
+                if retryable(e):
+                    raise
+                log.warning("ntfy refused the clip on topic %s (%s), sending the alert without it",
+                            self.cfg.ntfy.clips_topic, e)
+                message += f"\n(clip not attached: {e})"
+        kw = dict(title=title, tags=ALERT_TAGS, priority=self.cfg.ntfy.priority)
+        if clip_url:
+            kw.update(click=clip_url, actions=f"view, ▶ Play clip, {clip_url}")
+        sent = False
+        if snap is not None:
+            try:
+                self.publish(message, attachment=snap, filename="snapshot.jpg", **kw)
+                sent = True
             except NtfyError as e:
                 if not clip_rejected(e):
                     raise
-                log.warning("ntfy refused the clip (%s), sending the alert without it", e)
-                message += f"\n(clip not attached: {e})"
-        self.publish(message, **kw)
+                log.warning("ntfy refused the snapshot (%s), sending the alert as text", e)
+        if not sent:
+            self.publish(message, **kw)

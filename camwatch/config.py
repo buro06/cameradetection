@@ -100,7 +100,12 @@ class NtfyConfig:
     username: str = ""
     password: str = ""  # or env CAMWATCH_NTFY_PASSWORD (preferred)
     priority: int = 4  # 1 (min) … 5 (max/urgent)
-    attach_clip: bool = True  # falls back to text only if the server rejects the clip
+    attach_clip: bool = True  # upload the clip and link it from the alert (tap → plays)
+    clip_topic: str = ""  # where clips are uploaded; don't subscribe to it (empty = <topic>-clips)
+
+    @property
+    def clips_topic(self) -> str:
+        return self.clip_topic or f"{self.topic}-clips"
 
 
 @dataclass

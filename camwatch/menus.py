@@ -857,7 +857,7 @@ SETTINGS = [
     ("telegram", "send_unknown_faces", "Send unknown face photos for labeling"),
     ("telegram", "min_alert_interval_seconds", "Hard cooldown: at most one alert (any channel) per camera per (s)"),
     ("ntfy", "priority", "ntfy alert priority (1 min … 5 urgent)"),
-    ("ntfy", "attach_clip", "Attach the clip to ntfy alerts"),
+    ("ntfy", "attach_clip", "Upload the clip and link it from ntfy alerts"),
     ("detection", "model", "YOLO model (restart needed)"),
     ("detection", "device", "Device auto/cuda:0/cpu (restart needed)"),
     ("face", "device", "Face model device auto/cuda/cpu (restart needed)"),
