@@ -130,6 +130,8 @@ def cmd_doctor(args, console: Console) -> int:
     cfg = load_config(args.config)
     logging.getLogger("camwatch").setLevel(logging.ERROR)  # results are printed below instead
     check("Python", sys.version_info >= (3, 11), f"{platform.python_version()} on {platform.platform()}")
+    from .timefmt import now_text
+    console.print(f"  System time: {now_text()} (alert schedules use this clock)")
     try:
         import cv2
         check("OpenCV", True, cv2.__version__)

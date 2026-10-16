@@ -85,3 +85,20 @@ def test_unknown_ntfy_key_is_rejected(tmp_path):
     path.write_text("ntfy:\n  tpoic: oops\n")
     with pytest.raises(ValueError, match="tpoic"):
         load_config(path)
+
+
+def test_camera_schedule_round_trips_and_accepts_a_single_string(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text("cameras:\n  - name: door\n    source: 0\n    schedule: Mon-Fri 18:00-07:00\n")
+    cfg = load_config(path)
+    assert cfg.cameras[0].schedule == ["Mon-Fri 18:00-07:00"]
+    cfg.cameras[0].schedule.append("Sat,Sun 22:00-07:00")
+    cfg.save(path)
+    assert load_config(path).cameras[0].schedule == ["Mon-Fri 18:00-07:00", "Sat,Sun 22:00-07:00"]
+
+
+def test_bad_schedule_names_the_camera(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text("cameras:\n  - name: door\n    source: 0\n    schedule: [evenings]\n")
+    with pytest.raises(ValueError, match="door"):
+        load_config(path)

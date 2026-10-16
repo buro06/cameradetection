@@ -15,6 +15,17 @@ def clock(dt: datetime | float) -> str:
     return dt.strftime("%I:%M:%S %p").lstrip("0")
 
 
+def hm(dt: datetime) -> str:
+    """'6:00 PM'"""
+    return dt.strftime("%I:%M %p").lstrip("0")
+
+
+def now_text() -> str:
+    """'Thu 15 Oct 3:07:12 PM PDT' — the time zone shows whether the system clock is set up right."""
+    now = datetime.now().astimezone()
+    return f"{now:%a %d %b} {clock(now)} {now.tzname()}"
+
+
 def stamp(dt: datetime | float) -> str:
     """'2026-09-24 3:07:12 PM'"""
     if not isinstance(dt, datetime):

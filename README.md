@@ -8,6 +8,7 @@
 - **Telegram alerts** include a 5-second H.264 clip, starting the moment the person is detected. The caption names everyone seen (🟢 trusted, 🟠 known, 🔴 unknown).
 - **ntfy alerts** (ntfy.sh or your own server) push the same text with an annotated snapshot shown inline; tapping it plays the clip.
 - **Trusted people** don't trigger alerts. Unknown faces are saved so you can label them later from Telegram or the CLI.
+- **Alert schedules:** each camera can arm and disarm itself on a schedule, e.g. only evenings and nights.
 - **Hard cooldown:** each camera sends at most one alert (on any channel) per 30s (`telegram.min_alert_interval_seconds`); later ones are still clipped and logged as `rate-limited`.
 - **Interactive dashboard** with menus. A headless mode is available for running as a service.
 
@@ -97,6 +98,21 @@ That PC runs only MediaMTX and ffmpeg. They compress the video and share it as a
 
 [`remote-camera/`](remote-camera/README.md) has ready-made configs and step-by-step setup for both systems.
 
+### Alert schedules
+
+A camera with a schedule arms itself when one of its windows starts and disarms itself when the window ends. Set it from Menu → Cameras → *camera* → **Alert schedule**, or as `schedule:` under the camera in `config.yaml`:
+
+```yaml
+schedule: ["Mon-Fri 18:00-07:00", "Sat-Sun 22:00-07:00"]
+```
+
+- **Format:** times are 24-hour local time. A window can start with days (`Mon-Fri`, `Sat,Sun`, `Fri-Mon`).
+- **Overnight windows:** a window that crosses midnight belongs to the day it starts. `Mon-Fri 18:00-07:00` covers Friday night until Saturday 07:00, but not Sunday night.
+- **Empty list:** `[]` (the default) means no schedule. The camera is armed and disarmed by hand only.
+- **Manual changes:** `/arm` and `/disarm`, the `a` key and the arm menu still work. They hold until the camera's next scheduled change. For example, `/arm front-door` at noon keeps it armed until its schedule next disarms it. **Disarm all** wins over schedules until you **Arm all** again.
+- **Where you see it:** the dashboard's Alerts column, the Cameras menu and Telegram `/status` show the next scheduled change, e.g. `off · arms 6:00 PM`.
+- **The clock:** the dashboard header, the menu and `camwatch doctor` show the system time and time zone that schedules use. If they're wrong on a Linux server, fix them with `timedatectl set-timezone <Area/City>` (and `timedatectl set-ntp true`).
+
 ### Dashboard keys
 
 | Key | Action |
@@ -120,7 +136,7 @@ Monitoring keeps running while menus are open. Live view windows are hidden whil
 
 | Command | |
 |---|---|
-| `/status` | Camera health, arm state, what's in view, last event |
+| `/status` | Current time, camera health, arm state and schedule, what's in view, last event |
 | `/arm [camera]` · `/disarm [camera]` | Enable or pause alerts (all cameras, or one) |
 | `/snapshot [camera]` | Live picture(s) with detections drawn |
 | `/disk` | Space used by the camwatch folder (clips, snapshots, faces, models, logs, Python env) vs. free and total disk space, with a low-space warning |

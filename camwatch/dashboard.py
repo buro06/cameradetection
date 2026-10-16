@@ -17,7 +17,7 @@ from rich.text import Text
 
 from .engine import Engine
 from .liveview import LiveView
-from .timefmt import clock
+from .timefmt import clock, now_text
 
 DECISION_STYLE = {"alert": "bold red", "rate-limited": "red", "trusted": "green",
                   "disarmed": "dim", "unchanged": "dim"}
@@ -95,8 +95,8 @@ def render(engine: Engine, logs: LogBuffer, height: int) -> Layout:
     tg = "off"
     if engine.bot:
         tg = f"@{engine.bot.bot_name}" if engine.bot.connected else f"[red]error: {engine.bot.last_error[:40]}[/]"
-    header = Text.assemble(("camwatch ", "bold cyan"), arm,
-                           f"  up {up // 86400}d {up % 86400 // 3600:02d}:{up % 3600 // 60:02d}:{up % 60:02d}"
+    header = Text.assemble(("camwatch ", "bold cyan"), arm, ("  " + now_text(), "bold"),
+                           f"  ·  up {up // 86400}d {up % 86400 // 3600:02d}:{up % 3600 // 60:02d}:{up % 60:02d}"
                            f"  ·  detector {engine.detector.device}  ·  faces {len(engine.db.list_persons())} known, "
                            f"{len(engine.db.list_unknowns())} unknown  ·  telegram ")
     header.append_text(Text.from_markup(tg))
@@ -123,7 +123,8 @@ def render(engine: Engine, logs: LogBuffer, height: int) -> Layout:
                                  (_age(le.wall_time), "dim"))
         res = f"{r['resolution'][0]}x{r['resolution'][1]}" if r["resolution"][0] else "—"
         cams.add_row(r["name"], st_text, res, f"{r['fps']:.0f}", f"{r['infer_fps']:.1f}",
-                     Text("on", style="green") if r["armed"] else Text("off", style="yellow"),
+                     Text.assemble(("on", "green") if r["armed"] else ("off", "yellow"),
+                                   (f" · {r['schedule']}", "dim") if r["schedule"] else ""),
                      ", ".join(r["visible"]) or Text("—", style="dim"), last)
     if not engine.cfg.cameras:
         cams.add_row(Text("No cameras configured — press [m] → Cameras → Add", style="yellow"))

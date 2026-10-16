@@ -30,6 +30,9 @@ class CameraConfig:
     # USB pixel format: auto (MJPG on Windows, and on Linux above 640x480) | MJPG | YUY2 | none
     fourcc: str = "auto"
     snapshot_fps: float = 2.0
+    # when the camera is armed, e.g. ["Mon-Fri 18:00-07:00", "Sat-Sun 22:00-07:00"]: armed at each window's start,
+    # disarmed at its end (manual arm/disarm holds until the next change); [] = armed/disarmed by hand only
+    schedule: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -268,6 +271,19 @@ def _drop_removed(raw: dict[str, Any]) -> None:
         log.warning("Ignoring settings that no longer exist (they are removed on the next save): %s", ", ".join(dropped))
 
 
+def _camera_raw(c: dict) -> dict:
+    from .schedule import parse_schedule
+
+    c = {**c, "source": str(c.get("source", ""))}
+    sched = c.get("schedule") or []
+    c["schedule"] = [sched] if isinstance(sched, str) else [str(s) for s in sched]
+    try:
+        parse_schedule(c["schedule"])
+    except ValueError as e:
+        raise ValueError(f"Camera {c.get('name')!r}: {e}") from None
+    return c
+
+
 def load_config(path: Path | str = DEFAULT_CONFIG_PATH) -> AppConfig:
     path = Path(path)
     raw: dict[str, Any] = {}
@@ -283,7 +299,7 @@ def load_config(path: Path | str = DEFAULT_CONFIG_PATH) -> AppConfig:
         clip=_build(ClipConfig, raw.get("clip")),
         telegram=_build(TelegramConfig, raw.get("telegram")),
         ntfy=_build(NtfyConfig, raw.get("ntfy")),
-        cameras=[_build(CameraConfig, {**c, "source": str(c.get("source", ""))}) for c in raw.get("cameras") or []],
+        cameras=[_build(CameraConfig, _camera_raw(c)) for c in raw.get("cameras") or []],
     )
     cfg._path = path
     return cfg

@@ -22,6 +22,8 @@ from .camera import CameraStream, describe_source
 from .config import AppConfig, CameraConfig, field_default, yaml_scalar
 from .engine import Engine
 from .faces import MAX_EMBEDDINGS_PER_PERSON, image_files, read_image
+from .schedule import parse_schedule, split_windows
+from .timefmt import now_text
 from .usbcams import SetupResult, UsbCamera, find_working_setup, is_usb_source, list_cameras, try_setup
 
 log = logging.getLogger(__name__)
@@ -123,7 +125,7 @@ def probe_camera(cam: CameraConfig, cfg: AppConfig, timeout: float = 15.0) -> tu
 def main_menu(engine: Engine, console: Console) -> str | None:
     while True:
         console.clear()
-        console.rule("[bold cyan]camwatch menu[/] — monitoring continues in the background")
+        console.rule(f"[bold cyan]camwatch menu[/] — {now_text()} — monitoring continues in the background")
         n_unknown = len(engine.db.list_unknowns())
         choice = _select("What do you want to do?", [
             "📷  Cameras",
@@ -174,18 +176,50 @@ SOURCE_HELP = ("rtsp://user:pass@host:554/stream, http(s)://…/video.mjpg, "
                "http(s)://…/snapshot.jpg, or a video file path")
 
 
+def _schedule_text(engine: Engine, cam: CameraConfig) -> str:
+    if not cam.schedule:
+        return "— (manual)"
+    return f"{', '.join(cam.schedule)} ({engine.schedule_text(cam.name)})"
+
+
+def edit_schedule(engine: Engine, console: Console, cam: CameraConfig) -> None:
+    console.print(f"[b]{cam.name}[/] is armed during these windows and disarmed outside them. Arming or "
+                  f"disarming by hand holds until the next scheduled change.\n"
+                  f"Schedule: {_schedule_text(engine, cam)}\n"
+                  "Times are 24-hour; windows may cross midnight and start with days, e.g. "
+                  "[b]18:00-07:00[/] or [b]Mon-Fri 18:00-07:00, Sat-Sun 22:00-07:00[/]. Empty = no schedule.")
+    while True:
+        text = _text("Windows (comma separated):", default=", ".join(cam.schedule))
+        if text is None:
+            return
+        try:
+            windows = split_windows(text)
+            parse_schedule(windows)
+            break
+        except ValueError as e:
+            console.print(f"[red]{e}[/]")
+    cam.schedule = windows
+    cfg = engine.cfg
+    cfg.save()
+    engine.reset_schedule(cam.name)
+    engine.apply_schedules()
+    console.print(f"[green]Saved.[/] {_schedule_text(engine, cam)}")
+    _pause()
+
+
 def cameras_menu(engine: Engine, console: Console) -> None:
     cfg = engine.cfg
     while True:
         console.clear()
         t = Table(title="Cameras")
-        for c in ("Name", "Source", "Enabled", "Status", "Resolution"):
+        for c in ("Name", "Source", "Enabled", "Status", "Resolution", "Alert schedule"):
             t.add_column(c)
         rows = {r["name"]: r for r in engine.camera_rows()}
         for cam in cfg.cameras:
             r = rows.get(cam.name, {})
             t.add_row(cam.name, describe_source(cam.source), "yes" if cam.enabled else "no", r.get("status", ""),
-                      _resolution_text(cam, r.get("resolution", (0, 0))))
+                      _resolution_text(cam, r.get("resolution", (0, 0))),
+                      _schedule_text(engine, cam))
         console.print(t)
         choice = _select("Cameras:", [*(questionary.Choice(c.name, c) for c in cfg.cameras), ADD_USB, ADD_OTHER, BACK])
         if choice is None or choice == BACK:
@@ -473,7 +507,7 @@ def camera_actions(engine: Engine, console: Console, cam: CameraConfig) -> None:
     usb_actions = ["📐  Resolution", "🎞   Frame rate", "🎛   Pixel format / capture backend"] if is_usb(cam) else []
     if cam.source.strip().isdigit():
         usb_actions.append("🔗  Use this camera by name instead of index")
-    action = _select(f"{cam.name}:", ["📸  Snapshot", "✏️   Edit source", *usb_actions,
+    action = _select(f"{cam.name}:", ["📸  Snapshot", "✏️   Edit source", "🕒  Alert schedule", *usb_actions,
                                       "⏯   Disable" if cam.enabled else "⏯   Enable", "🗑   Remove", BACK])
     if action is None or action == BACK:
         return
@@ -481,6 +515,8 @@ def camera_actions(engine: Engine, console: Console, cam: CameraConfig) -> None:
         if not save_snapshots(engine, cameras=[cam.name]):
             console.print("[yellow]No frame available.[/]")
             _pause()
+    elif "schedule" in action:
+        edit_schedule(engine, console, cam)
     elif "Resolution" in action:
         change_usb_resolution(engine, console, cam)
     elif "by name" in action:

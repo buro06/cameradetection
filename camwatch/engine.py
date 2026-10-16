@@ -21,7 +21,8 @@ from .detector import PersonDetector
 from .events import CameraMonitor, EventResult
 from .faces import FaceDB, FaceEngine
 from .recorder import clip_path, draw_boxes, draw_stamp, purge_old_clips, write_clip
-from .timefmt import clock, stamp
+from .schedule import armed_at, next_change, parse_schedule
+from .timefmt import clock, hm, now_text, stamp
 
 log = logging.getLogger(__name__)
 
@@ -74,6 +75,7 @@ class Engine:
         self._state_path = self.data / "state.json"
         self.armed = True
         self.disarmed_cameras: set[str] = set()
+        self._sched_state: dict[str, bool] = {}  # what each camera's schedule last set it to
         self._load_state()
 
         self.bot = None
@@ -87,6 +89,7 @@ class Engine:
 
     # ---- lifecycle -------------------------------------------------------------
     def start(self) -> None:
+        self.apply_schedules()
         for cam in self.cfg.cameras:
             if cam.enabled:
                 self._start_camera(cam)
@@ -197,6 +200,52 @@ class Engine:
             return "🔔 Armed, except: " + ", ".join(sorted(self.disarmed_cameras))
         return "🔔 Alerts are <b>armed</b> on all cameras."
 
+    # ---- schedules ---------------------------------------------------------------
+    def apply_schedules(self, now: datetime | None = None) -> None:
+        """Arm/disarm cameras whose schedule changed state since the last check (or that weren't checked yet).
+        A manual arm/disarm in between is left alone until the schedule's next change. Only the camera's own
+        switch is flipped, so "disarm all" stays in force."""
+        now = now or datetime.now()
+        changed = False
+        for cam in self.cfg.cameras:
+            if not cam.schedule:
+                self._sched_state.pop(cam.name, None)
+                continue
+            windows = parse_schedule(cam.schedule)
+            want = armed_at(windows, now)
+            if self._sched_state.get(cam.name) == want:
+                continue
+            self._sched_state[cam.name] = want
+            if want == (cam.name not in self.disarmed_cameras):
+                continue
+            (self.disarmed_cameras.discard if want else self.disarmed_cameras.add)(cam.name)
+            changed = True
+            nxt = next_change(windows, now)
+            log.info("[%s] schedule: %s%s", cam.name, "armed" if want else "disarmed",
+                     f" until {self._when(nxt, now)}" if nxt else "")
+        if changed:
+            self._save_state()
+
+    def reset_schedule(self, camera: str) -> None:
+        """Apply the camera's (edited) schedule on the next check, overriding a manual arm/disarm."""
+        self._sched_state.pop(camera, None)
+
+    @staticmethod
+    def _when(dt: datetime, now: datetime) -> str:
+        return hm(dt) if dt.date() == now.date() else f"{dt:%a} {hm(dt)}"
+
+    def schedule_text(self, camera: str, now: datetime | None = None) -> str:
+        """The schedule's next change, e.g. 'arms 6:00 PM' ('' without a schedule)."""
+        cam = self.cfg.camera(camera)
+        if not cam or not cam.schedule:
+            return ""
+        now = now or datetime.now()
+        windows = parse_schedule(cam.schedule)
+        nxt = next_change(windows, now)
+        if nxt is None:
+            return "always armed" if armed_at(windows, now) else "never armed"
+        return f"{'disarms' if armed_at(windows, now) else 'arms'} {self._when(nxt, now)}"
+
     def _load_state(self) -> None:
         try:
             st = json.loads(self._state_path.read_text())
@@ -299,14 +348,21 @@ class Engine:
         result.frames = []  # free memory
 
     def _housekeeping_loop(self) -> None:
+        next_purge = 0.0
         while not self._halt.wait(5):
+            try:
+                self.apply_schedules()
+            except Exception:
+                log.exception("Applying alert schedules failed")
+            if time.monotonic() < next_purge:
+                continue
+            next_purge = time.monotonic() + 3600
             try:
                 n = purge_old_clips(self.clips_dir, self.cfg.clip.retention_days)
                 if n:
                     log.info("Deleted %d clip(s) older than %d days", n, self.cfg.clip.retention_days)
             except Exception:
                 log.exception("Housekeeping failed")
-            self._halt.wait(3600)
 
     # ---- queries -------------------------------------------------------------------
     def annotated_frame(self, camera: str) -> np.ndarray | None:
@@ -343,6 +399,7 @@ class Engine:
                 "status": (s.status if s.is_live() or s.status != "live" else "stale") if s else "disabled",
                 "error": s.error if s else "", "fps": s.fps if s else 0.0, "infer_fps": m.infer_fps if m else 0.0,
                 "resolution": s.resolution if s else (0, 0), "armed": self.is_armed(cam.name),
+                "schedule": self.schedule_text(cam.name),
                 "visible": list(m.visible) if m else [], "recording": bool(m and m.event),
                 "last_event": last, "reconnects": s.reconnects if s else 0,
             })
@@ -351,12 +408,15 @@ class Engine:
     def status_text(self) -> str:
         up = int(time.time() - self.started)
         lines = [f"<b>camwatch</b> · up {up // 86400}d {up % 86400 // 3600}h {up % 3600 // 60}m · {self.detector.device}",
-                 self.arm_text(), ""]
+                 f"🕒 {now_text()}", self.arm_text(), ""]
         for r in self.camera_rows():
             icon = {"live": "🟢", "disabled": "⚪"}.get(r["status"], "🔴")
             line = f"{icon} <b>{r['name']}</b> {r['status']}"
             if r["status"] == "live":
                 line += f" · {r['resolution'][0]}x{r['resolution'][1]} · {r['fps']:.0f} fps"
+            if r["schedule"]:
+                cam = self.cfg.camera(r["name"])
+                line += f" · {'armed' if r['armed'] else 'disarmed'}, schedule {', '.join(cam.schedule)} ({r['schedule']})"
             if r["visible"]:
                 line += f" · now: {', '.join(r['visible'])}"
             if r["last_event"]:
