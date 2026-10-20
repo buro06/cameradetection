@@ -245,3 +245,27 @@ def test_resolution_text_flags_mismatch():
     assert "asked 1920x1080" in menus._resolution_text(cam, (640, 360))
     assert menus._resolution_text(cam, (1920, 1080)) == "1920x1080"
     assert menus._resolution_text(CameraConfig(name="ip", source="rtsp://x"), (1280, 720)) == "1280x720"
+
+
+class FakeSnapshotSession:
+    """Serves one JPEG, then halts the stream so _run_snapshot returns."""
+
+    def __init__(self, stream):
+        self.stream = stream
+        ok, jpg = cv2.imencode(".jpg", np.zeros((480, 640, 3), np.uint8))
+        self.content = jpg.tobytes()
+
+    def get(self, url, timeout):
+        self.stream._halt.set()
+        return self
+
+    def raise_for_status(self):
+        pass
+
+
+def test_snapshot_camera_delivers_frames(monkeypatch):
+    stream = camera.CameraStream(CameraConfig(name="garage", source="http://cam/snapshot.jpg"), ClipConfig(), 2.0)
+    monkeypatch.setattr(camera.requests, "Session", lambda: FakeSnapshotSession(stream))
+    stream._run_snapshot()
+    fid, _, frame = stream.latest()
+    assert (fid, frame.shape, stream.error) == (1, (480, 640, 3), "")

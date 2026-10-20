@@ -9,7 +9,7 @@ def test_save_marks_changed_settings_with_their_default(tmp_path):
     cfg.face.match_threshold = 0.42
     cfg.clip.annotate = False
     cfg.telegram.chat_ids = [123, -456]
-    cfg.cameras = [CameraConfig(name="desk", source="0", width=1920), CameraConfig(name="door", source="rtsp://x/#1")]
+    cfg.cameras = [CameraConfig(name="desk", source="0", width=1920), CameraConfig(name="door", source="rtsp://x/#1", vehicles=True)]
     path = tmp_path / "config.yaml"
     cfg.save(path)
     text = path.read_text()
@@ -18,6 +18,7 @@ def test_save_marks_changed_settings_with_their_default(tmp_path):
     assert "annotate: false  # default: true\n" in text
     assert "chat_ids: [123, -456]  # default: []\n" in text
     assert "width: 1920  # default: 0\n" in text
+    assert "vehicles: true  # default: false\n" in text
     assert "detector_score: 0.5\n" in text  # unchanged → no comment
     assert "source: '0'\n" in text  # no default → no comment
 

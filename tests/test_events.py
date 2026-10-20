@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from camwatch.events import CameraMonitor, solid_people
+from camwatch.events import PARKED_BOX_ID, VEHICLE_BOX_ID, CameraMonitor, solid_people
 from conftest import FakeFaces, FakeStream, face, unit
 
 FRAME = np.zeros((720, 1280, 3), np.uint8)
@@ -13,15 +13,24 @@ SMALL_FACE = (615, 305, 645, 335)
 LEFT_FACE = (200, 120, 300, 230)
 RIGHT_FACE = (900, 120, 1000, 230)
 FPS = 5.0
+CAR = 2  # COCO class id
+PARKED = [700, 350, 1100, 650]
 
 
 def dets(*boxes):
-    return np.array([[*b, 0.9] for b in boxes], np.float32).reshape(-1, 5)
+    """Detector output for person boxes [x1, y1, x2, y2] and vehicle boxes [x1, y1, x2, y2, class] (see car())."""
+    return np.array([[*b[:4], 0.9, b[4] if len(b) > 4 else 0] for b in boxes], np.float32).reshape(-1, 6)
 
 
-def make_monitor(cfg, db, armed=True):
+def car(box):
+    return [*box, CAR]
+
+
+def make_monitor(cfg, db, armed=True, vehicles=False):
     faces = FakeFaces()
-    mon = CameraMonitor(cfg, FakeStream(), faces, db, lambda _cam: armed)
+    stream = FakeStream()
+    stream.cfg.vehicles = vehicles
+    mon = CameraMonitor(cfg, stream, faces, db, lambda _cam: armed)
     return mon, faces
 
 
@@ -336,3 +345,138 @@ def test_ring_buffer_keeps_frames_from_before_the_arrival_was_confirmed():
         stream._ring.append(BufferedFrame(i / clip.fps, FRAME, 1.0, None))
     rec = stream.start_recording(since=2.0)  # person first seen 2 s before the arrival was confirmed at t=4
     assert rec.frames and rec.frames[0].ts == pytest.approx(2.0)
+
+
+# ---- vehicles -------------------------------------------------------------------------------------
+def driving(x0, speed, stop=None, width=400, y=(350, 650)):
+    """A car box moving right at `speed` px/s from x0 (stopping at `stop`), as a function of time since t0."""
+    def at(dt):
+        x = x0 + speed * dt
+        x = min(x, stop) if stop is not None and speed > 0 else x
+        return car([x, y[0], x + width, y[1]])
+    return at
+
+
+def vehicle_events(results):
+    return [r for r in results if any(p.vehicle for p in r.people)]
+
+
+def test_car_parked_from_the_start_never_alerts(cfg, db):
+    mon, _ = make_monitor(cfg, db, vehicles=True)
+    results, _ = run(mon, [car(PARKED)], 0.0, 120)
+    assert results == []
+
+
+def test_cars_parked_when_the_camera_starts_are_not_moving_even_with_a_short_arrival_window(cfg, db):
+    cfg.events.arrive_seconds = 0.6
+    mon, _ = make_monitor(cfg, db, vehicles=True)
+    results, t = run(mon, [car(PARKED)], 0.0, 30)
+    _, t = run(mon, [], t, 10)  # camera outage
+    results += run(mon, [car(PARKED)], t, 30)[0]
+    assert results == []
+
+
+def test_someone_walking_in_front_of_a_parked_car_is_not_a_vehicle(cfg, db):
+    mon, faces = make_monitor(cfg, db, vehicles=True)
+    _, t = run(mon, [car(PARKED)], 0.0, 60)
+    hidden = car([850, 350, 1100, 650])  # left part hidden behind the person: box shrinks inside its spot
+    person = [640, 100, 900, 700]
+    results, _ = scripted(mon, faces, t, 20, lambda tt: ([person, hidden if tt < t + 10 else car(PARKED)], []))
+    assert [r.summary() for r in results] == ["Person (face not visible)"]
+
+
+def test_car_driving_in_and_parking_alerts_once(cfg, db):
+    mon, faces = make_monitor(cfg, db, vehicles=True)
+    _, t = run(mon, [], 0.0, 5)
+    arrive = driving(0, 120, stop=700)  # 30 % of its width per second
+    results, _ = scripted(mon, faces, t, 90, lambda tt: ([arrive(tt - t)], []))
+    assert [(r.decision, r.summary()) for r in results] == [("alert", "Moving car")]
+    assert results[0].people[0].icon == "🚗"
+
+
+def test_arrival_confirmed_on_a_missed_detection_still_names_the_vehicle(cfg, db):
+    mon, _ = make_monitor(cfg, db, vehicles=True)
+    _, t = run(mon, [], 0.0, 5)
+    arrive = driving(0, 120, stop=900)
+    for i in range(8):  # 1.6 s of the car driving in: not yet enough to count as arrived
+        mon.process(FRAME, dets(arrive(i / FPS)), t + i / FPS)
+    # the detector stalls for 0.8 s, then misses the car: 7 of the 8 detections in the window show it moving
+    mon.process(FRAME, dets(), t + 2.2)
+    assert mon.event is not None and mon.event.vehicle == "car"
+
+
+def test_a_minute_of_maneuvering_alerts_once(cfg, db):
+    mon, faces = make_monitor(cfg, db, vehicles=True)
+    _, t = run(mon, [], 0.0, 5)
+
+    def scene(tt):
+        x = (tt - t) * 120 % 1200
+        return [car([100 + (x if x < 600 else 1200 - x), 350, 500 + (x if x < 600 else 1200 - x), 650])], []
+    results, _ = scripted(mon, faces, t, 60, scene)
+    assert len(vehicle_events(results)) == 1
+
+
+def test_parked_car_driving_off_alerts(cfg, db):
+    mon, faces = make_monitor(cfg, db, vehicles=True)
+    _, t = run(mon, [car(PARKED)], 0.0, 120)
+    leave = driving(PARKED[0], -120)
+    results, _ = scripted(mon, faces, t, 15, lambda tt: ([leave(tt - t)], []))
+    assert [r.summary() for r in results] == ["Moving car"]
+
+
+def test_parked_car_lost_for_five_minutes_is_not_new_when_found_again(cfg, db):
+    mon, _ = make_monitor(cfg, db, vehicles=True)
+    _, t = run(mon, [car(PARKED)], 0.0, 60)
+    _, t = run(mon, [], t, 300)
+    results, _ = run(mon, [car(PARKED)], t, 60)
+    assert results == []
+
+
+def test_vehicles_are_ignored_unless_the_camera_watches_for_them(cfg, db):
+    mon, faces = make_monitor(cfg, db)
+    _, t = run(mon, [], 0.0, 5)
+    arrive = driving(0, 120, stop=700)
+    results, _ = scripted(mon, faces, t, 30, lambda tt: ([arrive(tt - t)], []))
+    assert results == []
+
+
+def test_distant_traffic_is_ignored(cfg, db):
+    mon, faces = make_monitor(cfg, db, vehicles=True)
+    _, t = run(mon, [], 0.0, 5)
+    far = driving(0, 60, width=60, y=(300, 330))  # a car on the road behind the yard
+    results, _ = scripted(mon, faces, t, 20, lambda tt: ([far(tt - t)], []))
+    assert results == []
+
+
+def test_moving_car_alerts_even_with_a_trusted_driver(cfg, db):
+    alice = unit(1)
+    enroll(db, "Alice", alice, trusted=True)
+    mon, faces = make_monitor(cfg, db, vehicles=True)
+    _, t = run(mon, [], 0.0, 5)
+    arrive = driving(0, 120, stop=700)
+    results, _ = scripted(mon, faces, t, 30, lambda tt: ([arrive(tt - t), LEFT], [face(LEFT_FACE, alice)]))
+    assert [(r.decision, sorted(p.label for p in r.people)) for r in results] == \
+        [("alert", ["Alice (trusted)", "Moving car"])]
+
+
+def test_faces_are_only_looked_for_in_person_boxes(cfg, db):
+    mon, faces = make_monitor(cfg, db, vehicles=True)
+    _, t = run(mon, [], 0.0, 5)
+    arrive = driving(0, 120, stop=700)
+    scripted(mon, faces, t, 10, lambda tt: ([arrive(tt - t)], []))
+    assert faces.calls == []
+    scripted(mon, faces, t + 10, 3, lambda tt: ([car(PARKED), LEFT], []))
+    assert faces.calls and {region for region, _ in faces.calls} == {tuple(float(v) for v in LEFT)}
+
+
+def test_clip_boxes_mark_moving_and_parked_vehicles(cfg, db):
+    mon, faces = make_monitor(cfg, db, vehicles=True)
+    _, t = run(mon, [car([0, 100, 300, 300])], 0.0, 5)
+    arrive = driving(0, 120, stop=300, y=(350, 650))
+    scene = lambda tt: ([car([0, 100, 300, 300]), arrive(tt - t)], [])  # noqa: E731
+    _, t2 = scripted(mon, faces, t, 2, scene)
+    assert sorted(i for i, _ in mon.stream.overlay.boxes) == [PARKED_BOX_ID, VEHICLE_BOX_ID]
+    assert mon.visible == ["1 moving vehicle"]
+    results, _ = scripted(mon, faces, t2, 28, scene)
+    (r,) = results
+    assert r.labels[VEHICLE_BOX_ID] == "moving vehicle" and r.labels[PARKED_BOX_ID] == "parked vehicle"

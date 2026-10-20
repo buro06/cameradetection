@@ -1,4 +1,4 @@
-"""Ultralytics YOLO person detector (batched across cameras)."""
+"""Ultralytics YOLO person and vehicle detector (batched across cameras)."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from .config import DetectionConfig
 
 log = logging.getLogger(__name__)
 PERSON_CLASS = 0
+VEHICLE_CLASSES = {2: "car", 3: "motorcycle", 5: "bus", 7: "truck"}  # COCO ids
 
 
 def cuda_check() -> tuple[bool, str]:
@@ -66,17 +67,19 @@ class PersonDetector:
         self.detect([np.zeros((cfg.imgsz, cfg.imgsz, 3), np.uint8)])  # warm-up
 
     def detect(self, frames: list[np.ndarray]) -> list[np.ndarray]:
-        """Returns per frame an (N, 5) array: x1, y1, x2, y2, confidence."""
+        """Returns per frame an (N, 6) array: x1, y1, x2, y2, confidence, class (PERSON_CLASS or a VEHICLE_CLASSES id).
+        Vehicles come from the same inference as people, so they cost nothing extra."""
         extra = {"half": True} if self.half else {}  # `half` is deprecated in newer ultralytics; only pass when used
         results = self.model.predict(
-            frames, classes=[PERSON_CLASS], conf=self.cfg.confidence, imgsz=self.cfg.imgsz,
+            frames, classes=[PERSON_CLASS, *VEHICLE_CLASSES], conf=self.cfg.confidence, imgsz=self.cfg.imgsz,
             device=self.device, verbose=False, **extra,
         )
         out = []
         for r in results:
             b = r.boxes
             if b is None or len(b) == 0:
-                out.append(np.zeros((0, 5), np.float32))
+                out.append(np.zeros((0, 6), np.float32))
             else:
-                out.append(np.hstack([b.xyxy.cpu().numpy(), b.conf.cpu().numpy()[:, None]]).astype(np.float32))
+                out.append(np.hstack([b.xyxy.cpu().numpy(), b.conf.cpu().numpy()[:, None],
+                                      b.cls.cpu().numpy()[:, None]]).astype(np.float32))
         return out

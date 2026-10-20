@@ -161,7 +161,7 @@ class NtfyNotifier:
         """Runs on the alerts thread while `result.frames` still exist: render the snapshot, queue the rest."""
         when = datetime.fromtimestamp(result.wall_time)
         title = f"{result.camera} — {clock(when)} ({when:%a %d %b})"
-        lines = [f"{'🟢' if p.trusted else ('🟠' if p.name else '🔴')} {p.scored_label}" for p in result.people]
+        lines = [f"{p.icon} {p.scored_label}" for p in result.people]
         message = "\n".join(lines) or "nobody identified"
         if not (self.cfg.ntfy.attach_clip and clip is not None and clip.exists()):
             clip = None

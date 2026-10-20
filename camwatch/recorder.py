@@ -22,7 +22,7 @@ log = logging.getLogger(__name__)
 
 GREEN, ORANGE, RED, GREY = (80, 200, 60), (0, 165, 255), (40, 40, 230), (170, 170, 170)
 WHITE, BLACK = (255, 255, 255), (0, 0, 0)
-NEUTRAL_LABELS = {"person", "unclear face", "face"}  # boxes that say nothing about who it is
+NEUTRAL_LABELS = {"person", "unclear face", "face", "parked vehicle"}  # boxes that say nothing about who it is
 
 
 def ffmpeg_exe() -> str | None:
@@ -38,7 +38,7 @@ def label_color(label: str) -> tuple[int, int, int]:
         return GREY
     if "(trusted)" in label or label.endswith("✓"):
         return GREEN
-    if label.lower().startswith(("unknown", "person")):
+    if label.lower().startswith(("unknown", "person", "moving")):
         return RED
     return ORANGE
 

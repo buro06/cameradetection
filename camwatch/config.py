@@ -33,6 +33,7 @@ class CameraConfig:
     # when the camera is armed, e.g. ["Mon-Fri 18:00-07:00", "Sat-Sun 22:00-07:00"]: armed at each window's start,
     # disarmed at its end (manual arm/disarm holds until the next change); [] = armed/disarmed by hand only
     schedule: list[str] = field(default_factory=list)
+    vehicles: bool = False  # also alert on moving vehicles (cars, motorcycles, buses, trucks); parked ones never alert
 
 
 @dataclass
@@ -45,6 +46,7 @@ class DetectionConfig:
     half: bool = False  # Maxwell GPUs (e.g. Quadro M4000) have no fast FP16
     # people smaller than this fraction of frame height don't count (twice that if cut off at the frame edge)
     person_min_height: float = 0.15
+    vehicle_min_width: float = 0.08  # vehicles narrower than this fraction of frame width don't count (distant traffic)
 
 
 @dataclass

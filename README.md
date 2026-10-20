@@ -14,7 +14,7 @@
 
 ## How alerts are decided
 
-Three rules per camera, all on one time span, `events.away_seconds` (30s): **someone has to be gone 30s before coming back alerts again.**
+Four rules per camera, all on one time span, `events.away_seconds` (30s): **someone has to be gone 30s before coming back alerts again.**
 
 1. **People (YOLO).** When someone appears in an empty camera, that's an **arrival**. Empty means no person seen for 30s, and the person must be in view for `events.arrive_seconds` (2s) to count. A box must be at least `detection.person_min_height` (15%) of the frame height, or twice that if cut off at the frame edge, so an arm poking into view doesn't count.
 2. **Faces (InsightFace), looked for only inside person boxes.**
@@ -26,12 +26,19 @@ Three rules per camera, all on one time span, `events.away_seconds` (30s): **som
    - faces seen clearly at least `face.min_sightings` times (2) are the people in it
    - if someone arrived and no face was clear enough (mask, hood, dark room, back turned), it's a **"Person (face not visible)"**
    - no alert if every new person is trusted
+4. **Moving vehicles (YOLO, only on cameras with `vehicles: true`).** Cars, motorcycles, buses and trucks come from the same YOLO pass as people, so they cost nothing extra.
+   - A vehicle is **parked** if its box sits where a vehicle has already been for at least 1s. It also counts as parked if it's mostly inside that spot, for example while someone walks in front of it. Any other vehicle is **moving**.
+   - Vehicles already in view when the camera starts watching are parked. Parked spots are remembered for an hour, so a parked car that YOLO loses for a while (dusk, someone standing in front of it) isn't new when it's found again.
+   - A moving vehicle in a camera that saw none moving for 30s (in view for `arrive_seconds`) starts an event, listed as **"Moving car"** (truck, …). It always alerts when armed, even if a trusted person gets out. Arriving, leaving and passing through all count. A minute of maneuvering is one alert.
+   - Vehicles narrower than `detection.vehicle_min_width` (8% of the frame width) don't count, which keeps distant traffic out.
+   - Turn it on per camera: Menu → Cameras → *camera* → **Moving-vehicle alerts**.
 
 An alert still isn't *sent* if the same camera sent one less than `telegram.min_alert_interval_seconds` (30s) ago. It's clipped and logged as `rate-limited`.
 
 **Known limits:**
 - A household member who's been gone 30s and comes back with their back to the camera alerts as "Person (face not visible)".
 - Someone masked who joins a person already in view isn't reported, because only an arrival in an empty camera is noticed without a face.
+- A vehicle creeping slower than about 10% of its length per second (~1.5 km/h), or one that crosses the view in under `arrive_seconds`, isn't noticed as moving.
 
 ## Install on Windows (Quadro M4000 / Maxwell)
 
@@ -186,6 +193,7 @@ Logs are written to `data/logs/camwatch.log` (rotated), every event to `data/eve
 | USB webcam stuck at 640×360 / 640×480 | Menu → Cameras → *camera* → **Resolution**. It lists the sizes the camera supports, then tries the capture setups (MJPG/YUY2, DirectShow/Media Foundation or V4L2) until one really delivers that size, and saves it. The Cameras table shows `640x360 (asked 1920x1080)` when the camera ignores the request |
 | USB webcam stuck at ~5 fps at 1080p | Menu → Cameras → *camera* → **Frame rate** → 30 fps (or `fps: 30` under the camera in `config.yaml`). The log line `USB camera opened: 1920x1080 MJPG @ 30 fps` shows what the camera accepted. A warning after 5 s means frames still arrive slowly. If the format shown is YUY2, set **Pixel format** → MJPG or try backend msmf; if it's MJPG, the room is probably too dim |
 | Alerts for people on the street far away | Raise `detection.person_min_height` (e.g. 0.25) |
+| "Moving car" alerts for traffic on a road in the background | Raise `detection.vehicle_min_width` (e.g. 0.15), or turn vehicles off for that camera |
 | Wrong name assigned | Move the wrong photos to the right person's folder (or delete them), then Settings → *Rebuild face database*. Raise `face.match_threshold` (0.4–0.45) and enroll more varied samples |
 | Known person shown as unknown | Enroll more samples (different light and angles), or lower `match_threshold` slightly (not below 0.28) |
 | Faces often drawn as "unclear face" | Lower `face.quality_min_sharpness` or raise `face.quality_max_turn` (more faces vote, but more wrong votes) |

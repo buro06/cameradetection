@@ -221,11 +221,6 @@ class CameraStream(threading.Thread):
                 if frame is None:
                     raise ValueError("response is not an image")
                 failures = 0
-                if check_size:
-                    got, check_size = (frame.shape[1], frame.shape[0]), None
-                    if got != (self.cfg.width, self.cfg.height):
-                        log.warning("[%s] requested %dx%d but camera delivers %dx%d (Cameras menu → Resolution "
-                                    "finds a setup that works)", self.cfg.name, self.cfg.width, self.cfg.height, *got)
                 self._on_frame(frame)
             except Exception as e:
                 failures += 1

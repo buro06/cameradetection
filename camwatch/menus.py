@@ -507,7 +507,8 @@ def camera_actions(engine: Engine, console: Console, cam: CameraConfig) -> None:
     usb_actions = ["📐  Resolution", "🎞   Frame rate", "🎛   Pixel format / capture backend"] if is_usb(cam) else []
     if cam.source.strip().isdigit():
         usb_actions.append("🔗  Use this camera by name instead of index")
-    action = _select(f"{cam.name}:", ["📸  Snapshot", "✏️   Edit source", "🕒  Alert schedule", *usb_actions,
+    vehicles = f"🚗  Moving-vehicle alerts: {'on' if cam.vehicles else 'off'}"
+    action = _select(f"{cam.name}:", ["📸  Snapshot", "✏️   Edit source", "🕒  Alert schedule", vehicles, *usb_actions,
                                       "⏯   Disable" if cam.enabled else "⏯   Enable", "🗑   Remove", BACK])
     if action is None or action == BACK:
         return
@@ -517,6 +518,10 @@ def camera_actions(engine: Engine, console: Console, cam: CameraConfig) -> None:
             _pause()
     elif "schedule" in action:
         edit_schedule(engine, console, cam)
+    elif "vehicle" in action:
+        cam.vehicles = not cam.vehicles
+        cfg.save()
+        engine.apply_camera(cam)
     elif "Resolution" in action:
         change_usb_resolution(engine, console, cam)
     elif "by name" in action:
@@ -877,6 +882,7 @@ SETTINGS = [
     ("detection", "confidence", "YOLO person confidence (0–1)"),
     ("detection", "detect_fps", "Inference rate per camera"),
     ("detection", "person_min_height", "People smaller than this fraction of frame height don't count"),
+    ("detection", "vehicle_min_width", "Vehicles narrower than this fraction of frame width don't count"),
     ("face", "match_threshold", "Face match threshold (higher = stricter)"),
     ("face", "min_sightings", "Clear sightings a face needs during an event to count"),
     ("face", "check_fps", "Face scans per second per camera (only while someone is in view)"),
