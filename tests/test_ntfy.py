@@ -87,7 +87,7 @@ def test_alert_is_one_message_with_snapshot_linking_the_clip(notifier, http, cli
     assert snap["body"][:2] == b"\xff\xd8"  # JPEG
     assert p["title"].startswith("Front door — ") and p["message"] == "🟠 Alice\n🔴 Unknown #7"
     assert (p["tags"], p["priority"]) == ("rotating_light", 4)
-    assert p["click"] == CLIP_URL and p["actions"] == f"view, ▶ Play clip, {CLIP_URL}"
+    assert "click" not in p and p["actions"] == f"view, ▶ Play clip, {CLIP_URL}"
 
 
 def test_clip_topic_can_be_configured(notifier, http, clip):
@@ -109,7 +109,7 @@ def test_rejected_clip_still_sends_the_snapshot_alert(notifier, http, clip, stat
 def test_without_frames_the_alert_is_text_with_the_clip_link(notifier, http, clip):
     notifier.send_alert(alert(frames=False), clip)
     assert summary(http) == [("PUT", "door.mp4"), ("POST", None)]
-    assert http.calls[1]["body"] == "nobody identified".encode() and http.calls[1]["params"]["click"] == CLIP_URL
+    assert http.calls[1]["body"] == "nobody identified".encode() and CLIP_URL in http.calls[1]["params"]["actions"]
 
 
 def test_attach_clip_off_sends_only_the_snapshot(notifier, http, clip):

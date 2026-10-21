@@ -6,7 +6,7 @@
 - **Person detection:** Ultralytics YOLO11, batched across all cameras on the GPU.
 - **Face recognition:** InsightFace **buffalo_l**: **SCRFD-10G** (detection) + **ArcFace R50** (recognition), run through onnxruntime (GPU if it works, otherwise CPU). The model weights are free for non-commercial use only, e.g. at home.
 - **Telegram alerts** include a 5-second H.264 clip, starting the moment the person is detected. The caption names everyone seen (🟢 trusted, 🟠 known, 🔴 unknown).
-- **ntfy alerts** (ntfy.sh or your own server) push the same text with an annotated snapshot shown inline; tapping it plays the clip.
+- **ntfy alerts** (ntfy.sh or your own server) push the same text with an annotated snapshot shown inline; its ▶ Play clip button plays the clip.
 - **Trusted people** don't trigger alerts. Unknown faces are saved so you can label them later from Telegram or the CLI.
 - **Alert schedules:** each camera can arm and disarm itself on a schedule, e.g. only evenings and nights.
 - **Hard cooldown:** each camera sends at most one alert (on any channel) per 30s (`telegram.min_alert_interval_seconds`); later ones are still clipped and logged as `rate-limited`.
@@ -80,7 +80,7 @@ Alerts go to `chat_ids`. Commands are accepted only from those chats or from `al
 
 - Each alert is titled with the camera and time. The body lists everyone seen (🟢 trusted, 🟠 known, 🔴 unknown).
 - Each alert carries a JPEG snapshot of the frame showing the most identified people, with boxes and names drawn on. The iOS app (1.7 or later) and the Android app show it inline.
-- Tapping the notification, or its **▶ Play clip** button, opens the clip (`ntfy.attach_clip`). ntfy allows one attachment per message, so the clip is uploaded to a second topic, `<topic>-clips` (`ntfy.clip_topic`). Don't subscribe to it; it only holds the files the alerts link to. With access control, the ntfy user needs write access to it too, e.g. `ntfy access camwatchusr 'camwatch*' rw`.
+- Tapping the notification opens it in the ntfy app with the snapshot; its **▶ Play clip** button opens the clip (`ntfy.attach_clip`). ntfy allows one attachment per message, so the clip is uploaded to a second topic, `<topic>-clips` (`ntfy.clip_topic`). Don't subscribe to it; it only holds the files the alerts link to. With access control, the ntfy user needs write access to it too, e.g. `ntfy access camwatchusr 'camwatch*' rw`.
 - The link stops working when the server's `attachment-expiry-duration` runs out (3 h by default). The clip stays in `data/clips/`.
 - A self-hosted server only accepts attachments if `attachment-cache-dir` is set in its `server.yml`. Its default size limit is 15 MB. If the server refuses the clip, the alert is sent without the link and says why. If it refuses the snapshot, the alert is sent as text.
 - `ntfy.priority` sets the notification priority, from 1 (min) to 5 (urgent). The default is 4 (high).

@@ -1,5 +1,5 @@
 """ntfy (https://ntfy.sh or self-hosted) alert delivery: a push notification per alert with an inline snapshot
-and a link that plays the clip."""
+and a ▶ Play clip button."""
 
 from __future__ import annotations
 
@@ -187,7 +187,8 @@ class NtfyNotifier:
                 message += f"\n(clip not attached: {e})"
         kw = dict(title=title, tags=ALERT_TAGS, priority=self.cfg.ntfy.priority)
         if clip_url:
-            kw.update(click=clip_url, actions=f"view, ▶ Play clip, {clip_url}")
+            # No `click`: tapping the notification opens the message (snapshot) in the app; the button plays the clip.
+            kw.update(actions=f"view, ▶ Play clip, {clip_url}")
         sent = False
         if snap is not None:
             try:
