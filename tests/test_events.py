@@ -480,3 +480,26 @@ def test_clip_boxes_mark_moving_and_parked_vehicles(cfg, db):
     results, _ = scripted(mon, faces, t2, 28, scene)
     (r,) = results
     assert r.labels[VEHICLE_BOX_ID] == "moving vehicle" and r.labels[PARKED_BOX_ID] == "parked vehicle"
+
+
+# ---- activity (for HTTP switches) ------------------------------------------------------------------
+def test_brief_false_person_is_not_activity_but_an_arrival_and_later_sightings_are(cfg, db):
+    mon, _ = make_monitor(cfg, db)
+    mon.process(FRAME, dets(LEFT), 0.0)
+    run(mon, [], 0.2, 5)
+    assert mon.last_activity == float("-inf")
+    _, t = run(mon, [LEFT], 10.0, 3)  # arrives after arrive_seconds
+    last = round(t - 1 / FPS, 6)
+    assert mon.last_activity == last
+    run(mon, [], t, 40)  # gone longer than away_seconds: the next sighting must arrive again
+    mon.process(FRAME, dets(LEFT), t + 40)
+    assert mon.last_activity == last
+
+
+def test_moving_car_is_activity_and_a_parked_one_is_not(cfg, db):
+    mon, faces = make_monitor(cfg, db, vehicles=True)
+    run(mon, [car(PARKED)], 0.0, 60)
+    assert mon.last_activity == float("-inf")
+    arrive = driving(0, 120, stop=300, y=(50, 340))
+    _, t = scripted(mon, faces, 60.0, 30, lambda tt: ([car(PARKED), arrive(tt - 60.0)], []))
+    assert mon.last_activity == pytest.approx(63.2)  # moving until it stopped at x=300 (62.5 s) and was in that spot 1 s

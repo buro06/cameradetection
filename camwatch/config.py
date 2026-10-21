@@ -114,6 +114,21 @@ class NtfyConfig:
 
 
 @dataclass
+class SwitchConfig:
+    """An HTTP GET target (lights, a relay, a webhook, ...): `on_url` is requested when its cameras see someone,
+    `off_url` once they don't. Under `http_get:` in config.yaml."""
+
+    name: str
+    cameras: list[str]  # on while any of these sees a person or moving vehicle that arrived (not a brief false one)
+    on_url: str
+    off_url: str
+    off_after_seconds: float = 120.0  # off once none of its cameras saw anything for this long
+    # when it reacts, in the camera schedule format, e.g. ["17:00-07:00"]; [] = always (ignores alert arming)
+    schedule: list[str] = field(default_factory=list)
+    enabled: bool = True
+
+
+@dataclass
 class AppConfig:
     data_dir: str = "data"
     rtsp_transport: str = "tcp"
@@ -124,6 +139,7 @@ class AppConfig:
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     ntfy: NtfyConfig = field(default_factory=NtfyConfig)
     cameras: list[CameraConfig] = field(default_factory=list)
+    http_get: list[SwitchConfig] = field(default_factory=list)
 
     # not serialized
     _path: Path = field(default=DEFAULT_CONFIG_PATH, repr=False, compare=False)
@@ -175,15 +191,15 @@ class AppConfig:
             if f.name.startswith("_"):
                 continue
             v = getattr(self, f.name)
-            if is_dataclass(v) or f.name == "cameras":
+            if is_dataclass(v) or f.name in LIST_SECTIONS:
                 lines.append("")
             if is_dataclass(v):
                 lines.append(f"{f.name}:")
                 lines += _yaml_fields(v, "  ")
-            elif f.name == "cameras":
-                lines.append("cameras:" if v else "cameras: []")
-                for cam in v:
-                    first, *rest = _yaml_fields(cam, "    ")
+            elif f.name in LIST_SECTIONS:
+                lines.append(f"{f.name}:" if v else f"{f.name}: []")
+                for item in v:
+                    first, *rest = _yaml_fields(item, "    ")
                     lines += ["  - " + first.lstrip(), *rest]
             else:
                 lines.append(_yaml_line(f.name, v, field_default(type(self), f.name), ""))
@@ -191,6 +207,7 @@ class AppConfig:
 
 
 _NO_DEFAULT = object()
+LIST_SECTIONS = ("cameras", "http_get")  # top-level lists of sections
 
 
 def field_default(cls, name: str) -> Any:
@@ -273,17 +290,29 @@ def _drop_removed(raw: dict[str, Any]) -> None:
         log.warning("Ignoring settings that no longer exist (they are removed on the next save): %s", ", ".join(dropped))
 
 
-def _camera_raw(c: dict) -> dict:
+def _str_list(v: Any) -> list[str]:
+    v = v or []
+    return [v] if isinstance(v, str) else [str(x) for x in v]
+
+
+def _with_schedule(c: dict, what: str) -> dict:
+    """`c` with its schedule as a list of strings; raises ValueError naming `what` if a window is bad."""
     from .schedule import parse_schedule
 
-    c = {**c, "source": str(c.get("source", ""))}
-    sched = c.get("schedule") or []
-    c["schedule"] = [sched] if isinstance(sched, str) else [str(s) for s in sched]
+    c = {**c, "schedule": _str_list(c.get("schedule"))}
     try:
         parse_schedule(c["schedule"])
     except ValueError as e:
-        raise ValueError(f"Camera {c.get('name')!r}: {e}") from None
+        raise ValueError(f"{what} {c.get('name')!r}: {e}") from None
     return c
+
+
+def _camera_raw(c: dict) -> dict:
+    return _with_schedule({**c, "source": str(c.get("source", ""))}, "Camera")
+
+
+def _switch_raw(s: dict) -> dict:
+    return _with_schedule({**s, "cameras": _str_list(s.get("cameras"))}, "HTTP GET")
 
 
 def load_config(path: Path | str = DEFAULT_CONFIG_PATH) -> AppConfig:
@@ -292,6 +321,9 @@ def load_config(path: Path | str = DEFAULT_CONFIG_PATH) -> AppConfig:
     if path.exists():
         raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     _drop_removed(raw)
+    if "switches" in raw and "http_get" not in raw:  # the feature's first name
+        raw["http_get"] = raw.pop("switches")
+        log.info("Config key `switches` is now `http_get` (renamed on the next save)")
     cfg = AppConfig(
         data_dir=raw.get("data_dir", "data"),
         rtsp_transport=raw.get("rtsp_transport", "tcp"),
@@ -302,6 +334,11 @@ def load_config(path: Path | str = DEFAULT_CONFIG_PATH) -> AppConfig:
         telegram=_build(TelegramConfig, raw.get("telegram")),
         ntfy=_build(NtfyConfig, raw.get("ntfy")),
         cameras=[_build(CameraConfig, _camera_raw(c)) for c in raw.get("cameras") or []],
+        http_get=[_build(SwitchConfig, _switch_raw(s)) for s in raw.get("http_get") or []],
     )
     cfg._path = path
+    for sw in cfg.http_get:
+        missing = [c for c in sw.cameras if cfg.camera(c) is None]
+        if missing:
+            log.warning("HTTP GET %r: no camera named %s", sw.name, ", ".join(map(repr, missing)))
     return cfg

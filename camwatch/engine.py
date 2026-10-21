@@ -16,12 +16,13 @@ import cv2
 import numpy as np
 
 from .camera import STALE_SECONDS, CameraStream, describe_source, set_rtsp_transport
-from .config import AppConfig, CameraConfig
+from .config import AppConfig, CameraConfig, SwitchConfig
 from .detector import PersonDetector
 from .events import CameraMonitor, EventResult
 from .faces import FaceDB, FaceEngine
 from .recorder import clip_path, draw_boxes, draw_stamp, purge_old_clips, write_clip
 from .schedule import armed_at, next_change, parse_schedule
+from .switches import HTTP_TIMEOUT, SwitchWorker
 from .timefmt import clock, hm, now_text, stamp
 
 log = logging.getLogger(__name__)
@@ -86,6 +87,7 @@ class Engine:
         if cfg.ntfy.enabled and cfg.ntfy.topic:
             from .ntfy import NtfyNotifier
             self.ntfy = NtfyNotifier(self)
+        self.switches = [SwitchWorker(self, sw) for sw in cfg.http_get if sw.enabled]
 
     # ---- lifecycle -------------------------------------------------------------
     def start(self) -> None:
@@ -102,6 +104,8 @@ class Engine:
             self.bot.start()
         if self.ntfy:
             self.ntfy.start()
+        for sw in self.switches:
+            sw.start()
         log.info("camwatch started: %d camera(s), detector on %s", len(self.streams), self.detector.device)
 
     def stop(self, say: Callable[[str], None] = lambda msg: None, timeout: float = 5.0) -> None:
@@ -115,14 +119,18 @@ class Engine:
             self.ntfy.stop()
         with self._cam_lock:
             streams = list(self.streams.values())
-        for s in streams:
+        for s in [*streams, *self.switches]:
             s.stop()
-        for t in [*streams, *self._workers]:
+        for t in [*streams, *self._workers, *self.switches]:
             say(f"waiting for {t.name} …")
             t0 = time.monotonic()
             t.join(timeout)
             state = "still running, giving up" if t.is_alive() else "stopped"
             say(f"  {t.name}: {state} ({time.monotonic() - t0:.1f}s)")
+        for sw in self.switches:
+            if sw.state and not sw.is_alive():
+                say(f"turning {sw.name} off")
+                sw.switch_off()
 
     # ---- cameras ---------------------------------------------------------------
     def _start_camera(self, cam: CameraConfig) -> None:
@@ -173,6 +181,37 @@ class Engine:
         elif self.ntfy is not None:
             self.ntfy.stop()
             self.ntfy = None
+
+    def apply_switches(self) -> None:
+        """Restart the HTTP GET workers after targets were added, edited or removed. One whose URLs didn't
+        change keeps its known state (no extra OFF); one that was removed, disabled or pointed elsewhere is
+        turned off if it was on."""
+        old = {id(sw.cfg): sw for sw in self.switches}
+        for sw in old.values():
+            sw.stop()
+        for sw in old.values():
+            if sw.is_alive():
+                sw.join(HTTP_TIMEOUT + 1)  # let a request in flight finish
+        self.switches = []
+        for cfg in self.cfg.http_get:
+            if not cfg.enabled:
+                continue
+            sw = SwitchWorker(self, cfg)
+            prev = old.get(id(cfg))
+            if prev and prev.urls == sw.urls:
+                sw.state, sw.failing = prev.state, prev.failing
+                del old[id(cfg)]
+            self.switches.append(sw)
+        for prev in old.values():
+            prev.switch_off()
+        for sw in self.switches:
+            sw.start()
+
+    def resync_switch(self, cfg: SwitchConfig) -> None:
+        """The device may have been switched behind the worker's back (e.g. a test): send what it should be."""
+        for sw in self.switches:
+            if sw.cfg is cfg:
+                sw.state = None
 
     # ---- arming ------------------------------------------------------------------
     def is_armed(self, camera: str) -> bool:
@@ -423,4 +462,5 @@ class Engine:
                 le = r["last_event"]
                 line += f"\n   last: {datetime.fromtimestamp(le.wall_time):%d %b} {clock(le.wall_time)} {le.decision} – {le.summary()}"
             lines.append(line)
+        lines += [f"🌐 <b>{sw.cfg.name}</b> {sw.status}" for sw in self.switches]
         return "\n".join(lines)

@@ -1,7 +1,7 @@
 import pytest
 import yaml
 
-from camwatch.config import AppConfig, CameraConfig, load_config
+from camwatch.config import AppConfig, CameraConfig, SwitchConfig, load_config
 
 
 def test_save_marks_changed_settings_with_their_default(tmp_path):
@@ -103,3 +103,37 @@ def test_bad_schedule_names_the_camera(tmp_path):
     path.write_text("cameras:\n  - name: door\n    source: 0\n    schedule: [evenings]\n")
     with pytest.raises(ValueError, match="door"):
         load_config(path)
+
+
+def test_switches_round_trip(tmp_path):
+    cfg = AppConfig(cameras=[CameraConfig(name="backyard", source="0")])
+    cfg.http_get = [SwitchConfig("lights", ["backyard"], "http://relay/on", "http://relay/off", schedule=["17:00-07:00"])]
+    path = tmp_path / "config.yaml"
+    cfg.save(path)
+    text = path.read_text()
+    assert "http_get:\n  - name: lights\n    cameras: [backyard]\n" in text
+    assert load_config(path).to_dict() == cfg.to_dict()
+
+
+def test_switch_with_one_camera_and_schedule_as_strings(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text("http_get:\n  - name: lights\n    cameras: backyard\n    on_url: http://a\n    off_url: http://b\n"
+                    "    schedule: 17:00-07:00\n")
+    (sw,) = load_config(path).http_get
+    assert (sw.cameras, sw.schedule, sw.off_after_seconds) == (["backyard"], ["17:00-07:00"], 120.0)
+
+
+def test_bad_switch_schedule_names_the_switch(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text("http_get:\n  - name: lights\n    cameras: [a]\n    on_url: x\n    off_url: y\n    schedule: [25:00-07:00]\n")
+    with pytest.raises(ValueError, match="HTTP GET 'lights'"):
+        load_config(path)
+
+
+def test_old_switches_key_loads_and_is_saved_as_http_get(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text("switches:\n  - name: lights\n    cameras: [a]\n    on_url: http://a\n    off_url: http://b\n")
+    cfg = load_config(path)
+    assert [s.name for s in cfg.http_get] == ["lights"]
+    cfg.save(path)
+    assert "http_get:\n  - name: lights\n" in path.read_text() and "switches" not in path.read_text()

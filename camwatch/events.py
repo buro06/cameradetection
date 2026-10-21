@@ -104,6 +104,7 @@ class Presence:
         self.cfg, self.camera, self.what = cfg, camera, what
         self.since: float | None = None  # when it appeared in the empty camera (None: empty)
         self.last_seen = float("-inf")  # last detection with it in it
+        self.last_confirmed = float("-inf")  # last detection with it in it since it arrived (or the arrival itself)
         self._hits: deque[tuple[float, bool]] = deque()  # (time, seen) for the arrival window
 
     def update(self, seen: bool, now: float) -> float | None:
@@ -118,6 +119,8 @@ class Presence:
         while self._hits[0][0] < now - arrive - 1.0:
             self._hits.popleft()
         if self.since is not None:
+            if seen:
+                self.last_confirmed = now
             return None
         frame = 1.0 / max(self.cfg.detection.detect_fps, 0.1)
         if now - self._hits[0][0] < arrive - frame / 2:  # not enough history to judge yet
@@ -126,6 +129,7 @@ class Presence:
         if sum(p for _, p in window) < ARRIVE_SHARE * len(window):
             return None
         self.since = next(ts for ts, p in window if p)
+        self.last_confirmed = now
         log.debug("[%s] %s arrived", self.camera, self.what)
         return self.since
 
@@ -266,6 +270,11 @@ class CameraMonitor:
     @property
     def name(self) -> str:
         return self.stream.cfg.name
+
+    @property
+    def last_activity(self) -> float:
+        """Last detection (monotonic) of a person or moving vehicle that had arrived, i.e. not a brief false one."""
+        return max(self.people.last_confirmed, self.moving.last_confirmed)
 
     @property
     def occupied_since(self) -> float | None:

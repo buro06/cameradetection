@@ -80,3 +80,16 @@ cameras:
   # - name: porch
   #   source: "https://192.168.1.40:8080/video"  # MJPEG / HLS / any FFmpeg-readable stream
   #   enabled: false
+
+# HTTP GET on/off: requests on_url when a camera sees a person or moving vehicle that arrived (same checks as
+# alerts, after arrive_seconds), and off_url once it's seen nothing for off_after_seconds. For outdoor lights, a relay,
+# a webhook, ... OFF is sent at startup and shutdown. Separate from alerts: arming and the alert cooldown don't apply.
+# Also set up from Menu → HTTP GET.
+http_get: []
+#  - name: backyard-lights
+#    cameras: [front-door, garage]   # on while any of these sees something
+#    on_url: "http://192.168.1.50/relay/0?turn=on"
+#    off_url: "http://192.168.1.50/relay/0?turn=off"
+#    off_after_seconds: 120
+#    schedule: ["17:00-07:00"]       # when it reacts, same format as camera schedules; [] = always
+#    enabled: true

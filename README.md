@@ -120,6 +120,32 @@ schedule: ["Mon-Fri 18:00-07:00", "Sat-Sun 22:00-07:00"]
 - **Where you see it:** the dashboard's Alerts column, the Cameras menu and Telegram `/status` show the next scheduled change, e.g. `off · arms 6:00 PM`.
 - **The clock:** the dashboard header, the menu and `camwatch doctor` show the system time and time zone that schedules use. If they're wrong on a Linux server, fix them with `timedatectl set-timezone <Area/City>` (and `timedatectl set-ntp true`).
 
+### HTTP GET (on/off URLs)
+
+camwatch can request a URL when something is seen, and another once it's gone. Use it for outdoor lights, a relay (Shelly, Tasmota), a webhook, or anything else a GET turns on and off. It requests `on_url` once when something is seen, and `off_url` once nothing has been seen for `off_after_seconds`.
+
+Set it up from Menu → **HTTP GET** → **Add HTTP GET**. It asks for the name, cameras, ON and OFF URLs (the OFF URL is suggested from the ON one), the off delay and an optional schedule, then offers a test. Choosing an entry lets you edit any of these, **Test** it (sends ON, waits for a key, then OFF), disable it or remove it. Changes apply right away. The table shows each entry's state.
+
+Or set it up in `config.yaml` and restart:
+
+```yaml
+http_get:
+  - name: backyard-lights
+    cameras: [backyard, driveway]
+    on_url: "http://192.168.1.50/relay/0?turn=on"
+    off_url: "http://192.168.1.50/relay/0?turn=off"
+    off_after_seconds: 120
+    schedule: ["17:00-07:00"]   # [] = always
+```
+
+- **What turns it on:** a person or moving vehicle on any of its cameras, by the same checks as alerts. That covers `detection.confidence`, `person_min_height`, `vehicle_min_width` and the camera's `vehicles: true`, and something must be in view for `events.arrive_seconds`. A brief false detection or a parked car doesn't count. Who it is doesn't matter, so trusted people trigger it too.
+- **Separate from alerts:** arming, camera schedules and the alert cooldown don't apply. The entry's own `schedule` decides when it reacts. When a window ends, the OFF URL is requested.
+- **Shared cameras:** several cameras can drive one entry. It stays on while any of them sees something.
+- **Startup and shutdown:** OFF is sent at startup, so the device's state is known, and again at shutdown if it's on.
+- **Errors:** a request that fails (no answer within 5s, or an HTTP error) is retried every 5s. Telegram `/status` shows each entry, e.g. `🌐 backyard-lights on`, or `off, unreachable`.
+- **Removing or disabling** an entry from the menu sends its OFF URL if it was on.
+- **Older configs:** a `switches:` section from before the rename still loads, and is saved as `http_get:`.
+
 ### Dashboard keys
 
 | Key | Action |

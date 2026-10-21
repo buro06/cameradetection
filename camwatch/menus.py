@@ -15,14 +15,16 @@ from pathlib import Path
 import cv2
 import numpy as np
 import questionary
+import requests
 from rich.console import Console
 from rich.table import Table
 
 from .camera import CameraStream, describe_source
-from .config import AppConfig, CameraConfig, field_default, yaml_scalar
+from .config import AppConfig, CameraConfig, SwitchConfig, field_default, yaml_scalar
 from .engine import Engine
 from .faces import MAX_EMBEDDINGS_PER_PERSON, image_files, read_image
 from .schedule import parse_schedule, split_windows
+from .switches import get as http_get
 from .timefmt import now_text
 from .usbcams import SetupResult, UsbCamera, find_working_setup, is_usb_source, list_cameras, try_setup
 
@@ -132,6 +134,7 @@ def main_menu(engine: Engine, console: Console) -> str | None:
             "🙂  People & faces",
             f"❓  Review unknown faces ({n_unknown})",
             "🔔  Arm / disarm alerts",
+            "🌐  HTTP GET (on/off URLs)",
             "✉️   Telegram",
             "📣  ntfy",
             "⚙️   Settings",
@@ -154,6 +157,8 @@ def main_menu(engine: Engine, console: Console) -> str | None:
                 unknowns_menu(engine, console)
             elif "Arm" in choice:
                 arm_menu(engine)
+            elif "HTTP GET" in choice:
+                switches_menu(engine, console)
             elif "Telegram" in choice:
                 telegram_menu(engine.cfg, console, engine)
             elif "ntfy" in choice:
@@ -182,22 +187,29 @@ def _schedule_text(engine: Engine, cam: CameraConfig) -> str:
     return f"{', '.join(cam.schedule)} ({engine.schedule_text(cam.name)})"
 
 
+def _ask_windows(console: Console, current: list[str]) -> list[str] | None:
+    """Schedule windows typed by the user (checked), or None if cancelled."""
+    while True:
+        text = _text("Windows (comma separated):", default=", ".join(current))
+        if text is None:
+            return None
+        try:
+            windows = split_windows(text)
+            parse_schedule(windows)
+            return windows
+        except ValueError as e:
+            console.print(f"[red]{e}[/]")
+
+
 def edit_schedule(engine: Engine, console: Console, cam: CameraConfig) -> None:
     console.print(f"[b]{cam.name}[/] is armed during these windows and disarmed outside them. Arming or "
                   f"disarming by hand holds until the next scheduled change.\n"
                   f"Schedule: {_schedule_text(engine, cam)}\n"
                   "Times are 24-hour; windows may cross midnight and start with days, e.g. "
                   "[b]18:00-07:00[/] or [b]Mon-Fri 18:00-07:00, Sat-Sun 22:00-07:00[/]. Empty = no schedule.")
-    while True:
-        text = _text("Windows (comma separated):", default=", ".join(cam.schedule))
-        if text is None:
-            return
-        try:
-            windows = split_windows(text)
-            parse_schedule(windows)
-            break
-        except ValueError as e:
-            console.print(f"[red]{e}[/]")
+    windows = _ask_windows(console, cam.schedule)
+    if windows is None:
+        return
     cam.schedule = windows
     cfg = engine.cfg
     cfg.save()
@@ -558,6 +570,179 @@ def camera_actions(engine: Engine, console: Console, cam: CameraConfig) -> None:
         engine.stop_camera(cam.name)
         cfg.cameras.remove(cam)
         cfg.save()
+
+
+# ---- HTTP GET (on/off URLs) ----------------------------------------------------------------
+ADD_SWITCH = "➕  Add HTTP GET"
+SWITCH_HELP = ("An HTTP GET requests its ON URL when one of its cameras sees a person or moving vehicle (same checks "
+               "as alerts), and its OFF URL once they've seen nothing for a while: for lights, a relay, a webhook, …")
+URL_HELP = "e.g. http://192.168.1.50/relay/0?turn=on (Shelly) or http://192.168.1.51/cm?cmnd=Power%20On (Tasmota)"
+OFF_GUESSES = [("turn=on", "turn=off"), ("on=true", "on=false"), ("Power%20On", "Power%20Off"),
+               ("Power%20on", "Power%20off"), ("state=on", "state=off")]
+
+
+def guess_off_url(on_url: str) -> str:
+    """The OFF URL that usually goes with an ON URL ('' if there's no telling)."""
+    for on, off in OFF_GUESSES:
+        if on in on_url:
+            return on_url.replace(on, off)
+    return on_url[:-3] + "/off" if on_url.endswith("/on") else ""
+
+
+def _switch_state(engine: Engine, sw: SwitchConfig) -> str:
+    worker = next((w for w in engine.switches if w.cfg is sw), None)
+    return worker.status if worker else "disabled"
+
+
+def _schedule_label(sw: SwitchConfig) -> str:
+    return ", ".join(sw.schedule) or "always"
+
+
+def switches_menu(engine: Engine, console: Console) -> None:
+    cfg = engine.cfg
+    while True:
+        console.clear()
+        t = Table(title="HTTP GET (on/off URLs)")
+        for c in ("Name", "Cameras", "Off after", "Reacts", "State"):
+            t.add_column(c)
+        for sw in cfg.http_get:
+            t.add_row(sw.name, ", ".join(sw.cameras), f"{sw.off_after_seconds:g}s", _schedule_label(sw),
+                      _switch_state(engine, sw))
+        console.print(t)
+        if not cfg.http_get:
+            console.print(SWITCH_HELP)
+        choice = _select("HTTP GET:", [*(questionary.Choice(s.name, s) for s in cfg.http_get), ADD_SWITCH, BACK])
+        if choice is None or choice == BACK:
+            return
+        if choice == ADD_SWITCH:
+            add_switch_flow(engine, console)
+        else:
+            switch_actions(engine, console, choice)
+
+
+def _ask_switch_name(cfg: AppConfig, current: str = "") -> str | None:
+    taken = {s.name.lower() for s in cfg.http_get} - {current.lower()}
+
+    def check(v: str):
+        if not v.strip():
+            return "Enter a name"
+        return f"There is already an HTTP GET named {v.strip()}" if v.strip().lower() in taken else True
+    name = _text("Name (e.g. backyard-lights):", default=current, validate=check)
+    return name.strip() if name else None
+
+
+def _ask_switch_cameras(cfg: AppConfig, current: list[str]) -> list[str] | None:
+    chosen = {c.lower() for c in current}
+    return questionary.checkbox(
+        "Cameras that turn it on (space to tick, enter when done):",
+        choices=[questionary.Choice(c.name, c.name, checked=c.name.lower() in chosen) for c in cfg.cameras],
+        validate=lambda picked: True if picked else "Tick at least one camera").ask()
+
+
+def _ask_url(prompt: str, current: str) -> str | None:
+    url = _text(prompt, default=current,
+                validate=lambda v: True if v.strip().startswith(("http://", "https://")) else "Must start with http://")
+    return url.strip() if url else None
+
+
+def _ask_off_after(current: float) -> float | None:
+    def check(v: str):
+        try:
+            return True if float(v) > 0 else "Must be more than 0"
+        except ValueError:
+            return "Enter a number of seconds"
+    text = _text("Turn off after nothing was seen for (seconds):", default=f"{current:g}", validate=check)
+    return float(text) if text else None
+
+
+def add_switch_flow(engine: Engine, console: Console) -> None:
+    cfg = engine.cfg
+    console.print(SWITCH_HELP)
+    if not cfg.cameras:
+        console.print("[yellow]Add a camera first.[/]")
+        _pause()
+        return
+    name = _ask_switch_name(cfg)
+    cameras = name and _ask_switch_cameras(cfg, [])
+    console.print(URL_HELP)
+    on_url = cameras and _ask_url("ON URL:", "")
+    off_url = on_url and _ask_url("OFF URL:", guess_off_url(on_url))
+    off_after = off_url and _ask_off_after(field_default(SwitchConfig, "off_after_seconds"))
+    if not off_after:
+        return
+    console.print("When should it react? 24-hour windows, e.g. [b]17:00-07:00[/]. Empty = always (day and night).")
+    schedule = _ask_windows(console, [])
+    if schedule is None:
+        return
+    sw = SwitchConfig(name, cameras, on_url, off_url, off_after, schedule)
+    cfg.http_get.append(sw)
+    cfg.save()
+    engine.apply_switches()
+    console.print(f"[green]Saved {sw.name}.[/]")
+    if _confirm("Test it now (ON, then OFF)?"):
+        test_switch(engine, console, sw)
+    else:
+        _pause()
+
+
+def test_switch(engine: Engine, console: Console, sw: SwitchConfig) -> None:
+    """Send ON, wait for a key, send OFF, then let the worker send what it should be."""
+    for what, url in (("ON", sw.on_url), ("OFF", sw.off_url)):
+        try:
+            with console.status(f"Sending {what} …"):
+                http_get(url)
+            console.print(f"[green]{what} sent.[/]")
+        except requests.RequestException as e:
+            console.print(f"[red]{what} failed:[/] {e}")
+        if what == "ON":
+            questionary.press_any_key_to_continue("Did it work? Press any key to send OFF …").ask()
+    engine.resync_switch(sw)
+    _pause()
+
+
+def switch_actions(engine: Engine, console: Console, sw: SwitchConfig) -> None:
+    cfg = engine.cfg
+    action = _select(f"{sw.name}:", [
+        questionary.Choice("🧪  Test (ON, then OFF)", "test"),
+        questionary.Choice(f"📷  Cameras: {', '.join(sw.cameras)}", "cameras"),
+        questionary.Choice(f"🟢  ON URL: {sw.on_url}", "on"),
+        questionary.Choice(f"⚫  OFF URL: {sw.off_url}", "off"),
+        questionary.Choice(f"⏱   Off after: {sw.off_after_seconds:g}s", "after"),
+        questionary.Choice(f"🕒  Reacts: {_schedule_label(sw)}", "schedule"),
+        questionary.Choice("✏️   Rename", "rename"),
+        questionary.Choice("⏯   Disable" if sw.enabled else "⏯   Enable", "toggle"),
+        questionary.Choice("🗑   Remove", "remove"),
+        BACK])
+    if action is None or action == BACK:
+        return
+    if action == "test":
+        test_switch(engine, console, sw)
+        return
+    if action == "remove":
+        if not _confirm(f"Remove HTTP GET {sw.name}? (its OFF URL is requested if on)", default=False):
+            return
+        cfg.http_get.remove(sw)
+    elif action == "toggle":
+        sw.enabled = not sw.enabled
+    elif action == "schedule":
+        console.print("24-hour windows, e.g. [b]17:00-07:00[/] or [b]Mon-Fri 18:00-23:00[/]. Empty = always.")
+        windows = _ask_windows(console, sw.schedule)
+        if windows is None:
+            return
+        sw.schedule = windows
+    else:
+        ask = {"cameras": lambda: _ask_switch_cameras(cfg, sw.cameras),
+               "on": lambda: _ask_url("ON URL:", sw.on_url), "off": lambda: _ask_url("OFF URL:", sw.off_url),
+               "after": lambda: _ask_off_after(sw.off_after_seconds),
+               "rename": lambda: _ask_switch_name(cfg, sw.name)}[action]
+        value = ask()
+        if not value:
+            return
+        setattr(sw, {"cameras": "cameras", "on": "on_url", "off": "off_url", "after": "off_after_seconds",
+                     "rename": "name"}[action], value)
+    cfg.save()
+    with console.status("Applying …"):
+        engine.apply_switches()
 
 
 # ---- people ---------------------------------------------------------------------------------
